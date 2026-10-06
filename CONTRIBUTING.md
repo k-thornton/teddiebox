@@ -18,7 +18,7 @@ Install the following, then follow the libopus steps.
 | Tool | Used by | Install |
 | --- | --- | --- |
 | Espressif Rust fork 1.95.0.0 with `rust-src`, and the Xtensa GCC | firmware | `espup install --toolchain-version 1.95.0.0 --targets esp32s3`, then `source ~/export-esp.sh` |
-| `cmake`, `libclang` | MbedTLS and libopus | package manager; set `LIBCLANG_PATH` to the directory holding `libclang.so` |
+| `cmake`, `libclang` | MbedTLS and libopus | package manager; set `LIBCLANG_PATH` to the directory holding `libclang.so` (`~/export-esp.sh` sets it to espup's) |
 | `just` | all recipes | package manager or `cargo install just` |
 | `espflash`, `esptool` | `just flash` | `cargo install espflash`; `pip install esptool` |
 | `cargo-deny`, `cargo-machete` | `just deny`, `just machete` | `cargo install` |
@@ -41,14 +41,21 @@ scripts/build-opus.sh path/to/opus-1.6.1 build/opus-device --device
 ```
 
 Point the variables at the `lib/` directories. The target name is upper-cased,
-with `-` replaced by `_`:
+with `-` replaced by `_`. The host's is `X86_64_UNKNOWN_LINUX_GNU` on Linux and
+`AARCH64_APPLE_DARWIN` on an Apple silicon Mac:
 
 ```sh
 export TEDDIEBOX_OPUS_LIB_DIR_X86_64_UNKNOWN_LINUX_GNU=$PWD/build/opus-host/lib
 export TEDDIEBOX_OPUS_LIB_DIR_XTENSA_ESP32S3_NONE_ELF=$PWD/build/opus-device/lib
 ```
 
-Put the exports in `.envrc.local`. Check the result with `just link`.
+Put the exports in `.envrc.local`, with `source ~/export-esp.sh`. Check the
+result with `just link`.
+
+On macOS the firmware builds and the host tests pass this way, with `cmake`,
+`just` and `rustup` from Homebrew. Homebrew's `rustup` is keg-only: put
+`$(brew --prefix rustup)/bin` on `PATH`. `just flash` and `just console` do not
+work on macOS yet: they find the port's owner through `/proc`.
 
 ## Layout
 
