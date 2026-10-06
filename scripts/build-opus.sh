@@ -20,7 +20,10 @@ if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
 fi
 
 src=$(realpath "$1")
-out=$(realpath -m "$2")
+# Created first because BSD realpath, unlike GNU's `-m`, resolves only
+# paths that exist.
+mkdir -p "$2"
+out=$(realpath "$2")
 here=$(dirname "$(realpath "$0")")
 
 flags=(
