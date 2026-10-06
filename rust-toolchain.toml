@@ -1,0 +1,4 @@
+# The toolchain `espup install` names `esp`. Only rustup reads this file; the
+# Nix dev shell puts its own toolchain first on PATH and is unaffected.
+[toolchain]
+channel = "esp"
