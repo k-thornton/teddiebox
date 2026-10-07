@@ -10,8 +10,9 @@ the firmware's parser does not need, and would leave the terminal broken if
 this crashed.
 
 **Only one program may use the port at a time.** Who holds it is found from
-`/proc`, not by matching command lines: a name match would block on an editor
-that has this file open, and miss a `cat /dev/ttyUSB0` or a stray picocom.
+`/proc`, or from `lsof` where there is no `/proc` (macOS), not by matching
+command lines: a name match would block on an editor that has this file open,
+and miss a `cat /dev/ttyUSB0` or a stray picocom.
 
 `--self-test` runs the logic below without a box attached.
 """
@@ -22,8 +23,12 @@ import os
 import select
 import subprocess
 import sys
+import termios
+import tty
 
-DEFAULT_PORT = "/dev/ttyUSB0"
+# `PORT`, as flash.sh reads it, so one setting serves both. On macOS the
+# adapter is a /dev/cu.usbserial-* device.
+DEFAULT_PORT = os.environ.get("PORT", "/dev/ttyUSB0")
 
 
 def frame(line):
@@ -53,6 +58,8 @@ def port_owners(port, proc_root="/proc", my_pid=None):
     directory cannot be read — so an empty answer means "nothing of yours",
     which is the case that matters at a bench.
     """
+    if not os.path.isdir(proc_root):
+        return lsof_owners(port, my_pid)
     target = os.path.realpath(port)
     owners = []
     for pid in sorted((e for e in os.listdir(proc_root) if e.isdigit()), key=int):
@@ -72,6 +79,38 @@ def port_owners(port, proc_root="/proc", my_pid=None):
                 owners.append(f"{pid} {command_of(proc_root, pid)}")
                 break
     return owners
+
+
+def lsof_owners(port, my_pid=None):
+    """`port_owners` for a system without `/proc`, from `lsof`.
+
+    `lsof -F pc` prints a `p<pid>` line, then a `c<command>` line, per
+    process. It exits 1 when nothing holds the file, which is not an error.
+    """
+    result = subprocess.run(
+        ["lsof", "-F", "pc", "--", port], capture_output=True, text=True, check=False
+    )
+    owners = []
+    pid = None
+    for line in result.stdout.splitlines():
+        if line.startswith("p"):
+            pid = int(line[1:])
+        elif line.startswith("c") and pid is not None and pid != my_pid:
+            owners.append(f"{pid} {line[1:]}")
+    return owners
+
+
+def configure(fd):
+    """Sets the port to what the box's console speaks: 115200, raw, no echo.
+
+    On the open descriptor rather than with an earlier `stty`: macOS resets a
+    serial port's settings when its last descriptor closes, and `stty -F` is
+    GNU-only.
+    """
+    tty.setraw(fd)
+    attrs = termios.tcgetattr(fd)
+    attrs[4] = attrs[5] = termios.B115200
+    termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 
 def self_test():
@@ -116,6 +155,39 @@ def self_test():
         fake("127", ["picocom", port], [port])
         assert len(port_owners(port, proc_root=proc)) == 2
 
+        # A real process holding a file is found the way this system finds
+        # one: from /proc on Linux, from lsof on macOS.
+        held = os.path.join(root, "held")
+        open(held, "w").close()
+        with open(held) as f:
+            holder = subprocess.Popen(["sleep", "30"], stdin=f)
+        try:
+            owners = port_owners(held)
+            assert any(o.startswith(f"{holder.pid} ") for o in owners), owners
+            assert port_owners(held, my_pid=holder.pid) == [], "own pid reported"
+        finally:
+            holder.kill()
+            holder.wait()
+        assert port_owners(elsewhere) == [], "an unheld file has an owner"
+
+    # A port left at 9600 and cooked, as a freshly plugged adapter comes up,
+    # ends at 115200 and raw.
+    parent, child = os.openpty()
+    try:
+        attrs = termios.tcgetattr(child)
+        attrs[4] = attrs[5] = termios.B9600
+        attrs[3] |= termios.ICANON | termios.ECHO
+        termios.tcsetattr(child, termios.TCSANOW, attrs)
+
+        configure(child)
+
+        _iflag, _oflag, _cflag, lflag, ispeed, ospeed, _cc = termios.tcgetattr(child)
+        assert ispeed == ospeed == termios.B115200, (ispeed, ospeed)
+        assert not lflag & (termios.ICANON | termios.ECHO), "still cooked"
+    finally:
+        os.close(parent)
+        os.close(child)
+
     print("self-test ok")
 
 
@@ -154,11 +226,10 @@ def main():
             f"the port takes one owner — stop it first:\n  {held}"
         )
 
-    # A port in the wrong mode shows nothing, which looks like a dead box.
-    subprocess.run(["stty", "-F", args.port, "115200", "raw", "-echo"], check=True)
-
     with open(args.log, "wb") if args.log else contextlib.nullcontext() as log:
         fd = os.open(args.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        # A port in the wrong mode shows nothing, which looks like a dead box.
+        configure(fd)
         print(
             f"--- {args.port} at 115200. Type a command; Ctrl-C or Ctrl-D leaves.",
             file=sys.stderr,

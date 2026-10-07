@@ -54,8 +54,9 @@ result with `just link`.
 
 On macOS the firmware builds and the host tests pass this way, with `cmake`,
 `just` and `rustup` from Homebrew. Homebrew's `rustup` is keg-only: put
-`$(brew --prefix rustup)/bin` on `PATH`. `just flash` and `just console` do not
-work on macOS yet: they find the port's owner through `/proc`.
+`$(brew --prefix rustup)/bin` on `PATH`. The adapter is a
+`/dev/cu.usbserial-*` device there: set `PORT` to it in `.envrc.local`, which
+`just flash` and `just console` both read.
 
 ## Layout
 
@@ -149,7 +150,7 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
   `just console` refuses to start while a capture runs, and `just flash`
   refuses while a console is open.
 - After `esptool` or `espflash`, set the port again before reading it:
-  `stty -F /dev/ttyUSB0 115200 raw -echo -echoe -echok -crtscts`.
+  `stty 115200 raw -echo -echoe -echok -crtscts </dev/ttyUSB0`.
   `scripts/flash.sh` and `scripts/battery-run.py` do this themselves.
 - `espflash` must touch the port before `esptool` does. After a failed
   `espflash`, run no `esptool` command. A power cycle is the only recovery.

@@ -133,5 +133,6 @@ echo "flash: starting the firmware"
 esptool --port "$PORT" --before no-reset --after watchdog-reset run >/dev/null
 
 # esptool leaves the line in a state the console reader does not expect.
-stty -F "$PORT" 115200 raw -echo
+# Through stdin because `stty -F` is GNU-only; BSD's is `-f`.
+stty 115200 raw -echo <"$PORT"
 echo "flash: done"
