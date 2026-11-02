@@ -8,15 +8,56 @@ use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::{ContentIndex, Position, TagUid};
 use teddiebox_download::{content_path, is_stock, playable_now, Cached, Sidecar, MAX_SIDECAR};
 
+use core::cell::{Cell, RefCell};
+
 use crate::storage;
 
+/// One path's answer, kept for as long as the index lives.
+type Memo<T> = Option<((u32, u32), T)>;
+
+/// Lives for one event (see `apply`), during which nothing writes the story
+/// it is asked about. So each card lookup is done once and remembered: one
+/// placement asks the same questions several times, and each is a blocking
+/// directory scan.
 pub struct CardIndex<'a> {
     card: &'a storage::Mounted,
+    length: Cell<Memo<Option<u32>>>,
+    sidecar_present: Cell<Memo<bool>>,
+    cached: RefCell<Memo<Cached>>,
 }
 
 impl<'a> CardIndex<'a> {
     pub fn new(card: &'a storage::Mounted) -> Self {
-        Self { card }
+        Self {
+            card,
+            length: Cell::new(None),
+            sidecar_present: Cell::new(None),
+            cached: RefCell::new(None),
+        }
+    }
+
+    fn audio_length(&self, directory: u32, file: u32) -> Option<u32> {
+        let key = (directory, file);
+        if let Some((seen, length)) = self.length.get() {
+            if seen == key {
+                return length;
+            }
+        }
+        let length = self.card.audio_length(directory, file);
+        self.length.set(Some((key, length)));
+        length
+    }
+
+    fn has_sidecar(&self, directory: u32, file: u32) -> bool {
+        let key = (directory, file);
+        if let Some((seen, present)) = self.sidecar_present.get() {
+            if seen == key {
+                return present;
+            }
+        }
+        let present = self.card.has_sidecar(directory, file);
+        self.sidecar_present.set(Some((key, present)));
+        present
     }
 
     /// Whether the card ships this story, as opposed to it being downloaded.
@@ -28,8 +69,8 @@ impl<'a> CardIndex<'a> {
     /// plays, since a download's position is saved apart from stock content.
     pub fn on_stock_card(&self, directory: u32, file: u32) -> bool {
         is_stock(
-            self.card.audio_length(directory, file),
-            self.card.has_sidecar(directory, file),
+            self.audio_length(directory, file),
+            self.has_sidecar(directory, file),
         )
     }
 
@@ -56,6 +97,18 @@ impl<'a> CardIndex<'a> {
     }
 
     fn cached(&self, directory: u32, file: u32) -> Cached {
+        let key = (directory, file);
+        if let Some((seen, cached)) = &*self.cached.borrow() {
+            if *seen == key {
+                return cached.clone();
+            }
+        }
+        let cached = self.look_up(directory, file);
+        *self.cached.borrow_mut() = Some((key, cached.clone()));
+        cached
+    }
+
+    fn look_up(&self, directory: u32, file: u32) -> Cached {
         let mut buffer = [0u8; MAX_SIDECAR];
         // A sidecar that is not valid UTF-8 cannot be trusted, and is
         // treated as no sidecar.
@@ -67,7 +120,7 @@ impl<'a> CardIndex<'a> {
 
         Cached {
             sidecar,
-            length_on_card: self.card.audio_length(directory, file),
+            length_on_card: self.audio_length(directory, file),
         }
     }
 }
