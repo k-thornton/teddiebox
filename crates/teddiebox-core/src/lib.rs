@@ -121,9 +121,10 @@ pub enum Action {
     /// Ask the server whether the story cached for this figure is still
     /// current.
     ///
-    /// Answered by [`Event::Revalidated`]. Nothing plays until then: replacing
-    /// a file while it plays would need two open handles on one file and a
-    /// rename, and the SD card library supports neither.
+    /// Sent alongside `Play`, and answered by [`Event::Revalidated`]. A stale
+    /// story is replaced on the next placement, not while it plays: that would
+    /// need two open handles on one file and a rename, and the SD card library
+    /// supports neither.
     Revalidate(TagUid),
     /// Stop a download that is no longer needed.
     AbortFetch,
@@ -357,7 +358,7 @@ impl Core {
                 extend(actions, self.playback.on_content_ready(tag, index));
             }
             Event::Revalidated(tag, freshness) => {
-                extend(actions, self.playback.on_revalidated(tag, freshness, index));
+                extend(actions, self.playback.on_revalidated(tag, freshness));
             }
             Event::ContentMissing(tag, why) => {
                 extend(actions, self.playback.on_content_missing(tag, why));
@@ -507,6 +508,9 @@ mod tests {
         fn wants_revalidation(&self, _tag: TagUid) -> bool {
             false
         }
+        fn is_stale(&self, _tag: TagUid) -> bool {
+            false
+        }
     }
 
     /// A card with nothing on it, so a test can reach `State::Fetching`.
@@ -519,6 +523,9 @@ mod tests {
             Position::Start
         }
         fn wants_revalidation(&self, _tag: TagUid) -> bool {
+            false
+        }
+        fn is_stale(&self, _tag: TagUid) -> bool {
             false
         }
     }

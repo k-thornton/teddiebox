@@ -98,7 +98,7 @@ impl ContentIndex for CardIndex<'_> {
     }
 
     /// Whether this figure's story should be checked against the server
-    /// before it plays.
+    /// while it plays.
     ///
     /// No check is needed for:
     /// - **Stock content**: a file under `CONTENT/` has no sidecar and was
@@ -116,6 +116,13 @@ impl ContentIndex for CardIndex<'_> {
             return false;
         }
         playable_now(false, &self.cached(path.directory, path.file))
+    }
+
+    /// A probe contradicted this story earlier in the session, while it
+    /// played. The download that replaces it clears the mark.
+    fn is_stale(&self, tag: TagUid) -> bool {
+        let path = content_path(tag.0);
+        crate::marked_stale(path.directory, path.file)
     }
 
     /// Where this story should resume: the position held in RAM if there is

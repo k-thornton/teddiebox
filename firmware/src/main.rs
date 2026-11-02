@@ -291,6 +291,16 @@ fn take_stale(dir: u32, file: u32) -> bool {
     })
 }
 
+/// Whether a probe this session has contradicted this cache entry. Unlike
+/// [`take_stale`], this only looks.
+pub(crate) fn marked_stale(dir: u32, file: u32) -> bool {
+    let path = teddiebox_download::ContentPath {
+        directory: dir,
+        file,
+    };
+    critical_section::with(|cs| *STALE.borrow_ref(cs) == Some(path))
+}
+
 /// The question the box is waiting on the server for, if any.
 ///
 /// Used only by the media task: `perform` starts the question and the loop
@@ -417,7 +427,7 @@ fn freshness_of(
     };
     if teddiebox_download::is_stale(&sidecar, teddiebox_cloud::Probed::Length(total)) {
         esp_println::println!(
-            "teddiebox: plate {:016X} is {} bytes here and {total} there — fetching it again",
+            "teddiebox: plate {:016X} is {} bytes here and {total} there — fetching it on the next placement",
             tag.ruid(),
             sidecar.length
         );
@@ -1406,7 +1416,7 @@ fn gather_revalidation(card: Option<&storage::Mounted>, placed: &Placed) -> Opti
         });
         if let Some(teddiebox_download::Settled { ruid, .. }) = settled {
             esp_println::println!(
-                "teddiebox: plate {ruid:016X} — no answer in {} s, playing what is here",
+                "teddiebox: plate {ruid:016X} — no answer in {} s, keeping what is here",
                 teddiebox_download::PATIENCE_MS / 1_000
             );
         }
@@ -2049,6 +2059,18 @@ async fn serve_get_while_connected(
         Some(tls) => match critical_section::with(|cs| *FETCH_REQUEST.borrow_ref(cs)) {
             None => {
                 esp_println::println!("teddiebox: get has no request queued — nothing to fetch")
+            }
+            // A probe goes out while its story starts playing, and a full
+            // handshake blocks this executor for about 1.25 s, far longer than
+            // the audio buffer. Only a resumed one (57 ms) is safe, so without
+            // a session to resume the figure goes unasked this session.
+            Some(FetchRequest {
+                ruid, probe: true, ..
+            }) if !tls.can_resume() => {
+                esp_println::println!(
+                    "teddiebox: ask {ruid:016X} skipped — no session to resume while playing"
+                );
+                probe_ended(ruid);
             }
             Some(FetchRequest {
                 ruid,

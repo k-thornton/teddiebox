@@ -15,6 +15,10 @@ pub trait ContentIndex {
     /// content can need checking; a file placed under `CONTENT/` by hand has
     /// no sidecar to compare against.
     fn wants_revalidation(&self, tag: TagUid) -> bool;
+    /// Whether a check this session found that the server has a different
+    /// story for this figure. The next placement downloads it instead of
+    /// playing the old copy.
+    fn is_stale(&self, tag: TagUid) -> bool;
 }
 
 /// What the server said about a story already on the card.
@@ -30,8 +34,6 @@ pub enum Freshness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Idle,
-    /// Waiting to hear whether the cached story is still current.
-    Checking(TagUid),
     Fetching(TagUid),
     Playing(TagUid),
     Failed,
@@ -80,8 +82,7 @@ impl Playback {
     pub fn kind(&self) -> PlaybackKind {
         match self.state {
             State::Idle => PlaybackKind::Idle,
-            // Both are "waiting on the network" to everything outside.
-            State::Checking(_) | State::Fetching(_) => PlaybackKind::Fetching,
+            State::Fetching(_) => PlaybackKind::Fetching,
             State::Playing(_) => PlaybackKind::Playing,
             State::Failed => PlaybackKind::Failed,
         }
@@ -100,23 +101,22 @@ impl Playback {
         // the story missing and the box would download it again.
         if matches!(
             self.state,
-            State::Playing(seen) | State::Fetching(seen) | State::Checking(seen) if seen == tag
+            State::Playing(seen) | State::Fetching(seen) if seen == tag
         ) {
             return actions;
         }
-        if index.is_available(tag) {
-            // Check before playing, not during. Replacing a file while it
-            // plays would need two handles on one file and a rename, and
-            // `embedded-sdmmc` supports neither.
-            if index.wants_revalidation(tag) {
-                self.state = State::Checking(tag);
-                let _ = actions.push(Action::Revalidate(tag));
-                return actions;
-            }
+        if index.is_available(tag) && !index.is_stale(tag) {
             let from = index.saved_position(tag);
             self.position = from;
             self.state = State::Playing(tag);
             let _ = actions.push(Action::Play { tag, from });
+            // Play first, ask alongside. A newer story replaces this one on
+            // the next placement: replacing a file while it plays would need
+            // two handles on one file and a rename, and `embedded-sdmmc`
+            // supports neither.
+            if index.wants_revalidation(tag) {
+                let _ = actions.push(Action::Revalidate(tag));
+            }
         } else {
             self.state = State::Fetching(tag);
             let _ = actions.push(Action::RequestContent(tag));
@@ -139,42 +139,19 @@ impl Playback {
             State::Fetching(_) => {
                 let _ = actions.push(Action::AbortFetch);
             }
-            // Nothing to abort. A late answer is ignored by the check in
-            // `on_revalidated`.
-            State::Checking(_) | State::Idle | State::Failed => {}
+            State::Idle | State::Failed => {}
         }
         self.state = State::Idle;
         actions
     }
 
-    /// What the server said about a cached story, and what to do about it.
-    pub fn on_revalidated<I: ContentIndex>(
-        &mut self,
-        tag: TagUid,
-        freshness: Freshness,
-        index: &I,
-    ) -> Actions {
-        let mut actions = Actions::new();
-        // Ignore an answer that arrives after the figure was lifted or
-        // swapped.
-        if self.state != State::Checking(tag) {
-            return actions;
-        }
-        match freshness {
-            Freshness::Current => {
-                let from = index.saved_position(tag);
-                self.position = from;
-                self.state = State::Playing(tag);
-                let _ = actions.push(Action::Play { tag, from });
-            }
-            // Same path as a figure with no content, so there is only one
-            // download path.
-            Freshness::Stale => {
-                self.state = State::Fetching(tag);
-                let _ = actions.push(Action::RequestContent(tag));
-            }
-        }
-        actions
+    /// What the server said about a cached story.
+    ///
+    /// The story is already playing by the time this arrives, so nothing
+    /// changes now. A stale story is marked by the firmware, and
+    /// [`ContentIndex::is_stale`] sends the next placement to the network.
+    pub fn on_revalidated(&mut self, _tag: TagUid, _freshness: Freshness) -> Actions {
+        Actions::new()
     }
 
     pub fn on_content_ready<I: ContentIndex>(&mut self, tag: TagUid, index: &I) -> Actions {
@@ -232,6 +209,7 @@ mod tests {
         available: bool,
         resume: Position,
         wants_asking: bool,
+        stale: bool,
     }
 
     impl ContentIndex for Index {
@@ -244,6 +222,9 @@ mod tests {
         fn wants_revalidation(&self, _tag: TagUid) -> bool {
             self.wants_asking
         }
+        fn is_stale(&self, _tag: TagUid) -> bool {
+            self.stale
+        }
     }
 
     fn known(page: u32) -> Index {
@@ -251,6 +232,7 @@ mod tests {
             available: true,
             resume: Position::Exact { page },
             wants_asking: false,
+            stale: false,
         }
     }
 
@@ -259,6 +241,7 @@ mod tests {
             available: false,
             resume: Position::default(),
             wants_asking: false,
+            stale: false,
         }
     }
 
@@ -268,89 +251,71 @@ mod tests {
             available: true,
             resume: Position::Exact { page },
             wants_asking: true,
+            stale: false,
         }
     }
 
-    /// A cached story that may be out of date is checked with the server
-    /// before it plays.
+    /// A cached story that may be out of date plays at once, and the server
+    /// is asked about it alongside.
     #[test]
-    fn a_figure_that_has_not_been_asked_about_is_asked_before_it_plays() {
+    fn a_figure_that_has_not_been_asked_about_plays_and_is_asked_about() {
         // Given
         let mut p = Playback::new();
 
         // When
-        let actions = p.on_tag_present(TAG, &unchecked(1));
-
-        // Then
-        assert_eq!(actions.as_slice(), &[Action::Revalidate(TAG)]);
-        assert_eq!(p.kind(), PlaybackKind::Fetching);
-    }
-
-    #[test]
-    fn a_story_the_server_agrees_with_plays_from_where_it_stopped() {
-        // Given
-        let mut p = Playback::new();
-        p.on_tag_present(TAG, &unchecked(412));
-
-        // When
-        let actions = p.on_revalidated(TAG, Freshness::Current, &unchecked(412));
+        let actions = p.on_tag_present(TAG, &unchecked(412));
 
         // Then
         assert_eq!(
             actions.as_slice(),
-            &[Action::Play {
-                tag: TAG,
-                from: Position::Exact { page: 412 }
-            }]
+            &[
+                Action::Play {
+                    tag: TAG,
+                    from: Position::Exact { page: 412 }
+                },
+                Action::Revalidate(TAG)
+            ]
         );
         assert_eq!(p.kind(), PlaybackKind::Playing);
     }
 
-    /// A stale story is downloaded again, the same way as a figure with no
-    /// story, so the child hears the new version.
+    /// The answer arrives while the story plays. Neither answer interrupts
+    /// it; a stale story is replaced on the next placement.
     #[test]
-    fn a_stale_story_is_fetched_again_rather_than_played() {
+    fn an_answer_does_not_interrupt_the_story() {
+        for freshness in [Freshness::Current, Freshness::Stale] {
+            // Given
+            let mut p = Playback::new();
+            p.on_tag_present(TAG, &unchecked(412));
+
+            // When
+            let actions = p.on_revalidated(TAG, freshness);
+
+            // Then
+            assert!(actions.as_slice().is_empty(), "{freshness:?}");
+            assert_eq!(p.kind(), PlaybackKind::Playing);
+        }
+    }
+
+    /// A story the server has changed is downloaded again on the next
+    /// placement, the same way as a figure with no story.
+    #[test]
+    fn a_stale_story_is_fetched_on_the_next_placement() {
         // Given
         let mut p = Playback::new();
-        p.on_tag_present(TAG, &unchecked(412));
+        let stale = Index {
+            available: true,
+            resume: Position::Exact { page: 412 },
+            wants_asking: false,
+            stale: true,
+        };
 
         // When
-        let actions = p.on_revalidated(TAG, Freshness::Stale, &unchecked(412));
+        let actions = p.on_tag_present(TAG, &stale);
 
         // Then
         assert_eq!(actions.as_slice(), &[Action::RequestContent(TAG)]);
         assert_eq!(p.kind(), PlaybackKind::Fetching);
-    }
-
-    /// An answer that arrives after the figure was lifted or swapped is
-    /// ignored.
-    #[test]
-    fn an_answer_for_a_figure_no_longer_on_the_plate_is_ignored() {
-        // Given
-        let mut p = Playback::new();
-        p.on_tag_present(TAG, &unchecked(1));
-
-        // When
-        let actions = p.on_revalidated(OTHER, Freshness::Stale, &unchecked(1));
-
-        // Then
-        assert!(actions.as_slice().is_empty());
-    }
-
-    /// Lifting a figure while it is being checked stops the wait. Nothing is
-    /// aborted, because nothing was being downloaded.
-    #[test]
-    fn lifting_a_figure_that_is_being_asked_about_aborts_nothing() {
-        // Given
-        let mut p = Playback::new();
-        p.on_tag_present(TAG, &unchecked(1));
-
-        // When
-        let actions = p.on_tag_absent();
-
-        // Then
-        assert!(actions.as_slice().is_empty());
-        assert_eq!(p.kind(), PlaybackKind::Idle);
     }
 
     /// A figure already checked since boot plays without asking the server
@@ -438,6 +403,7 @@ mod tests {
             available: true,
             resume: Position::Start,
             wants_asking: false,
+            stale: false,
         };
 
         // When

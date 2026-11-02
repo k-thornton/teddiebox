@@ -9,6 +9,8 @@ struct Library {
     resume: Position,
     /// Cached, and not yet asked about since the box booted.
     unchecked: bool,
+    /// A check this session found the server has a newer story.
+    stale: bool,
 }
 
 impl ContentIndex for Library {
@@ -20,6 +22,9 @@ impl ContentIndex for Library {
     }
     fn wants_revalidation(&self, _tag: TagUid) -> bool {
         self.unchecked
+    }
+    fn is_stale(&self, _tag: TagUid) -> bool {
+        self.stale
     }
 }
 
@@ -35,6 +40,7 @@ fn a_child_plays_a_story_adjusts_the_volume_and_lifts_the_figure() {
         available: true,
         resume: Position::Exact { page: 1 },
         unchecked: false,
+        stale: false,
     };
 
     // When: the figure goes on, an ear is tapped, the box is slapped, and the
@@ -69,11 +75,13 @@ fn an_unknown_figure_is_fetched_then_played() {
         available: false,
         resume: Position::default(),
         unchecked: false,
+        stale: false,
     };
     let downloaded = Library {
         available: true,
         resume: Position::Exact { page: 1 },
         unchecked: false,
+        stale: false,
     };
 
     // When: the figure goes on an empty card, and its download finishes
@@ -100,6 +108,7 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
         available: true,
         resume: Position::Exact { page: 1 },
         unchecked: false,
+        stale: false,
     };
     core.handle(Event::TagPresent(TAG), &library);
 
@@ -118,42 +127,50 @@ fn an_exhausted_pack_powers_the_box_off_mid_story() {
 }
 
 /// A figure placed for the first time since boot, whose story is already on
-/// the card. The box asks the server before playing, learns that the file has
-/// changed, and downloads the new one, so the child hears the current story.
+/// the card. The story plays at once while the box asks the server, which
+/// says the file has changed. The next time the figure goes on, the new story
+/// is downloaded and starts where the child left off.
 #[test]
-fn a_cached_story_the_server_has_changed_is_fetched_before_it_plays() {
+fn a_cached_story_the_server_has_changed_is_fetched_on_the_next_placement() {
     // Given
     let mut core = Core::new(CoreConfig::default());
-    let cached = Library {
+    let mut cached = Library {
         available: true,
         resume: Position::Exact { page: 412 },
         unchecked: true,
+        stale: false,
     };
 
-    // When: the figure goes on, the server says the story has changed, and
-    // the download finishes
+    // When: the figure goes on, the server says the story has changed, the
+    // figure comes off and goes back on, and the download finishes
     let placed = core.handle(Event::TagPresent(TAG), &cached);
     let stale = core.handle(Event::Revalidated(TAG, Freshness::Stale), &cached);
+    core.handle(Event::TagAbsent, &cached);
+    cached.unchecked = false;
+    cached.stale = true;
+    let replaced = core.handle(Event::TagPresent(TAG), &cached);
     let ready = core.handle(Event::ContentReady(TAG), &cached);
 
-    // Then: nothing plays until the server has answered, and then the story
-    // starts where the child left it
+    // Then: the old story played without waiting, and the new one replaced it
+    // on the next placement
+    let play = Action::Play {
+        tag: TAG,
+        from: Position::Exact { page: 412 },
+    };
+    assert!(has(&placed, play));
     assert!(has(&placed, Action::Revalidate(TAG)));
     assert!(
-        !placed.iter().any(|a| matches!(a, Action::Play { .. })),
-        "nothing plays until the server has answered: {placed:?}"
+        !stale
+            .iter()
+            .any(|a| matches!(a, Action::Pause | Action::Stop)),
+        "the answer does not interrupt the story: {stale:?}"
     );
-    assert!(has(&stale, Action::RequestContent(TAG)));
-    assert!(has(
-        &ready,
-        Action::Play {
-            tag: TAG,
-            from: Position::Exact { page: 412 }
-        }
-    ));
+    assert!(has(&replaced, Action::RequestContent(TAG)));
+    assert!(has(&ready, play));
 }
 
-/// Offline: the server cannot be reached, so the cached story plays.
+/// Offline: the server cannot be reached. The cached story was already
+/// playing, and keeps playing.
 #[test]
 fn a_story_the_server_could_not_be_asked_about_still_plays() {
     // Given
@@ -162,18 +179,25 @@ fn a_story_the_server_could_not_be_asked_about_still_plays() {
         available: true,
         resume: Position::Start,
         unchecked: true,
+        stale: false,
     };
-    core.handle(Event::TagPresent(TAG), &cached);
 
     // When
+    let placed = core.handle(Event::TagPresent(TAG), &cached);
     let answered = core.handle(Event::Revalidated(TAG, Freshness::Current), &cached);
 
     // Then
     assert!(has(
-        &answered,
+        &placed,
         Action::Play {
             tag: TAG,
             from: Position::Start
         }
     ));
+    assert!(
+        !answered
+            .iter()
+            .any(|a| matches!(a, Action::Pause | Action::Stop)),
+        "{answered:?}"
+    );
 }
