@@ -637,6 +637,10 @@ pub(crate) static PLATE_REPORT: AtomicBool = AtomicBool::new(false);
 /// latest state cannot overflow; a figure placed and lifted within one media
 /// pass is never seen, which is fine.
 pub(crate) static PLATE_TAG: Signal<CriticalSectionRawMutex, Seen> = Signal::new();
+/// Raised with every [`PLATE_TAG`], so an idle media loop wakes for it at once
+/// instead of at its next poll. Separate because waiting on `PLATE_TAG`
+/// itself would take the value.
+pub(crate) static PLATE_WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Serves one console `nfc` command, if a request is pending.
 async fn handle_console_request(reader: &mut Reader, request: u8) {
@@ -761,8 +765,12 @@ fn poll_plate(reader: &mut Reader, poll: &mut PlatePoll) {
             // the story from the cloud.
             let token = reader.read_token();
             PLATE_TAG.signal(Seen::Figure { uid: tag.0, token });
+            PLATE_WAKE.signal(());
         }
-        TagEvent::Left(_) => PLATE_TAG.signal(Seen::Nothing),
+        TagEvent::Left(_) => {
+            PLATE_TAG.signal(Seen::Nothing);
+            PLATE_WAKE.signal(());
+        }
     }
 }
 

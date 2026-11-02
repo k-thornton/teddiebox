@@ -1764,13 +1764,14 @@ async fn handle_idle(
     // A late drain stalls the socket: while downloading, wake as soon as the
     // network fills the pipe, with the poll as a fallback.
     if downloading {
+        select(Timer::after(Duration::from_millis(5)), PIPE_FILLED.wait()).await;
+    } else {
+        // A figure placed now is handled at once, not up to 100 ms later.
         select(
-            Timer::after(Duration::from_millis(5)),
-            PIPE_FILLED.wait(),
+            Timer::after(Duration::from_millis(100)),
+            nfc::PLATE_WAKE.wait(),
         )
         .await;
-    } else {
-        Timer::after(Duration::from_millis(100)).await;
     }
 }
 
