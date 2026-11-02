@@ -119,6 +119,8 @@ const TONIE_CONTENT_DIR: &str = "CONTENT";
 /// The same `<8 hex>/<8 hex>` layout as `CONTENT`. The stock firmware does not
 /// read it.
 const CACHE_DIR: &str = "CACHE";
+/// The figure played last and its page, for `resume = last`. At the root.
+const LAST_PLAYED_FILE: &str = "LASTPLAY.TXT";
 
 /// Where the card's copy of the certificate authority lives.
 ///
@@ -686,6 +688,38 @@ impl Mounted {
                 self.volumes
                     .flush_file(file)
                     .map_err(|_| "the config file would not flush")
+            });
+        self.close_file(file);
+        outcome
+    }
+
+    /// Reads `/LASTPLAY.TXT`, the figure that last played and its page, for
+    /// `resume = last`. Creates nothing; a missing file reads as `None`.
+    pub fn read_last_played(&self, buffer: &mut [u8]) -> Option<usize> {
+        let name = ShortFileName::create_from_str(LAST_PLAYED_FILE).ok()?;
+        let file = self.open_file(name).ok()?;
+        let filled = self.read(file, buffer).ok();
+        self.close_file(file);
+        filled
+    }
+
+    /// Replaces `/LASTPLAY.TXT`. Empty bytes leave an empty file, which
+    /// resumes nothing.
+    pub fn write_last_played(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        let name = ShortFileName::create_from_str(LAST_PLAYED_FILE)
+            .map_err(|_| "the last-played name is not a short name")?;
+        let file = self
+            .volumes
+            .open_file_in_dir(self.root, name, Mode::ReadWriteCreateOrTruncate)
+            .map_err(|_| "the last-played file would not open for writing")?;
+        let outcome = self
+            .volumes
+            .write(file, bytes)
+            .map_err(|_| "the last-played file would not write")
+            .and_then(|()| {
+                self.volumes
+                    .flush_file(file)
+                    .map_err(|_| "the last-played file would not flush")
             });
         self.close_file(file);
         outcome

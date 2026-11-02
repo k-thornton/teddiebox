@@ -27,18 +27,23 @@ All options are listed under [Configuration](#configuration).
 
 ### Position per story
 
-Stock firmware remembers the position of the last figure played, also across standby.
-Playing a different figure in between resets it.
+By default the box resumes like a stock box: only the figure played last
+resumes, also across power-off, and playing a different figure in between
+starts it over. Placing another figure briefly is how a story is restarted.
+That one position is stored in `LASTPLAY.TXT` in the SD card's root, written at
+shutdown.
 
-teddiebox remembers the position of every story, also across power-off.
+Set `resume = every` in `config.txt` to remember the position of every story
+instead, also across power-off.
 
 - The position is written to the SD card when the figure's memory is needed for
   another figure, and at shutdown.
 - A story played to its end starts from the beginning next time.
 - The position is stored in `<story>.pos` next to the story on the SD card.
   Delete it to start that story from the beginning.
-- A flat battery or a reset loses the position since the last write. Writing
-  more often would wear the SD card.
+
+In both modes, a flat battery or a reset loses the position since the last
+write. Writing more often would wear the SD card.
 
 ### Chapter skip
 
@@ -110,6 +115,7 @@ Settings are in `config.txt` in the SD card's root. Example:
     password = correct horse battery
     server = teddycloud.local:443
     ears_skip = yes
+    resume = last
     # update_url = https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt
     # setup_password = my own passphrase
 
@@ -129,6 +135,7 @@ Options:
 | `password` | empty | WiFi passphrase, up to 63 characters. Empty for an open network |
 | `server` | required | `host:port` of your teddyCloud, up to 64 characters. Only letters, digits, `.`, `-`, `_` and `:` |
 | `ears_skip` | `yes` | holding an ear skips a chapter. `yes`/`no`, `true`/`false` or `1`/`0`. `no` gives stock ear behaviour, see [Chapter skip](#chapter-skip) |
+| `resume` | `last` | which stories resume where they stopped. `last`: only the figure played last, as on a stock box. `every`: every story. See [Position per story](#position-per-story) |
 | `update_url` | none | `https://` URL of an update manifest, up to 128 characters. Without it the box never checks for updates, see [Updates over the air](#updates-over-the-air). An empty value is an error |
 | `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters, see [Setup mode](#changing-settings-without-an-sd-card-reader) |
 

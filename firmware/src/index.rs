@@ -60,6 +60,11 @@ impl<'a> CardIndex<'a> {
         present
     }
 
+    /// The card this index reads.
+    pub fn card(&self) -> &storage::Mounted {
+        self.card
+    }
+
     /// Whether the card ships this story, as opposed to it being downloaded.
     ///
     /// Both kinds are under `CONTENT/`. Stock content is always complete and
@@ -188,6 +193,12 @@ impl ContentIndex for CardIndex<'_> {
         // when the RAM copy is about to be lost.
         if let Some(page) = crate::held_place(tag) {
             return Position::Exact { page };
+        }
+        // Stock: only the last figure resumes, from the one record at the
+        // card's root. The per-story files are left alone, not read.
+        if !crate::resume_every() {
+            return crate::last_played_page(tag)
+                .map_or(Position::Start, |page| Position::Exact { page });
         }
 
         let path = content_path(tag.0);

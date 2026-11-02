@@ -56,6 +56,12 @@ pub struct Config {
     /// Defaults to `true`. When off, a held ear changes the volume like any
     /// other press, as on a stock box.
     pub ears_skip: bool,
+    /// Whether every story resumes where it stopped (`resume = every`).
+    ///
+    /// Defaults to `false` (`resume = last`), as on a stock box: only the
+    /// figure played most recently resumes, and playing another figure in
+    /// between starts it over.
+    pub resume_every: bool,
     /// Where to fetch the OTA manifest, in full — scheme, host, port and
     /// path, e.g.
     /// `https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt`.
@@ -226,6 +232,7 @@ impl Settings {
                 password: String::new(),
                 server: String::new(),
                 ears_skip: true,
+                resume_every: false,
                 update_url: None,
                 setup_password: None,
             },
@@ -234,6 +241,7 @@ impl Settings {
                 password: false,
                 server: false,
                 ears_skip: false,
+                resume_every: false,
                 update_url: false,
                 setup_password: false,
             },
@@ -334,6 +342,7 @@ pub struct Overridden {
     pub password: bool,
     pub server: bool,
     pub ears_skip: bool,
+    pub resume_every: bool,
     pub update_url: bool,
     pub setup_password: bool,
 }
@@ -364,6 +373,11 @@ impl Overridden {
                 held.ears_skip
             } else {
                 card.ears_skip
+            },
+            resume_every: if self.resume_every {
+                held.resume_every
+            } else {
+                card.resume_every
             },
             update_url: if self.update_url {
                 held.update_url.clone()
@@ -399,6 +413,7 @@ impl Config {
         let mut password: String<MAX_PASSWORD> = String::new();
         let mut server: Option<String<MAX_SERVER>> = None;
         let mut ears_skip = true;
+        let mut resume_every = false;
         let mut update_url: Option<String<MAX_UPDATE_URL>> = None;
         let mut setup_password: Option<String<MAX_PASSWORD>> = None;
 
@@ -418,6 +433,7 @@ impl Config {
                 &mut password,
                 &mut server,
                 &mut ears_skip,
+                &mut resume_every,
                 &mut update_url,
                 &mut setup_password,
             )?;
@@ -434,6 +450,7 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .ok_or(ConfigError::MissingServer)?,
             ears_skip,
+            resume_every,
             update_url,
             setup_password,
         })
@@ -452,6 +469,7 @@ fn apply_line(
     password: &mut String<MAX_PASSWORD>,
     server: &mut Option<String<MAX_SERVER>>,
     ears_skip: &mut bool,
+    resume_every: &mut bool,
     update_url: &mut Option<String<MAX_UPDATE_URL>>,
     setup_password: &mut Option<String<MAX_PASSWORD>>,
 ) -> Result<(), ConfigError> {
@@ -473,6 +491,16 @@ fn apply_line(
         }
         "ears_skip" => {
             *ears_skip = parse_bool(strip_comment(value))?;
+        }
+        "resume" => {
+            let value = strip_comment(value);
+            *resume_every = if value.eq_ignore_ascii_case("every") {
+                true
+            } else if value.eq_ignore_ascii_case("last") {
+                false
+            } else {
+                return Err(ConfigError::MalformedValue);
+            };
         }
         // No comment stripping, like `password`.
         "setup_password" => {
@@ -728,6 +756,51 @@ mod tests {
 
         // Then
         assert!(c.ears_skip);
+    }
+
+    /// Stock behaviour unless the card asks otherwise.
+    #[test]
+    fn a_missing_resume_key_resumes_only_the_last_figure() {
+        // Given
+        let text = "ssid = A\nserver = s:1\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
+        assert!(!c.resume_every);
+    }
+
+    #[test]
+    fn resume_takes_every_or_last_in_any_case() {
+        for (value, every) in [
+            ("every", true),
+            ("EVERY", true),
+            ("last", false),
+            ("Last", false),
+        ] {
+            // Given
+            let text = std::format!("ssid = A\nserver = s:1\nresume = {value} # note\n");
+
+            // When
+            let c = Config::parse(&text).unwrap();
+
+            // Then
+            assert_eq!(c.resume_every, every, "{value}");
+        }
+    }
+
+    /// A typo is reported, not read as either mode.
+    #[test]
+    fn an_unknown_resume_value_is_refused() {
+        // Given
+        let text = "ssid = A\nserver = s:1\nresume = all\n";
+
+        // When
+        let parsed = Config::parse(text);
+
+        // Then
+        assert_eq!(parsed, Err(ConfigError::MalformedValue));
     }
 
     #[test]

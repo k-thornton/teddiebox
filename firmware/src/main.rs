@@ -58,7 +58,7 @@ use teddiebox_board::{self as board, Gates, Rail};
 use teddiebox_console::CommandWatch;
 use teddiebox_core::cue::Cue;
 use teddiebox_core::pipe::Pipe;
-use teddiebox_core::place::PendingPlace;
+use teddiebox_core::place::{LastPlayed, PendingPlace};
 use teddiebox_core::plate::{Placed, Settlement};
 use teddiebox_core::position::{self, MAX_POSITION};
 use teddiebox_core::sounds::{Language, Sound};
@@ -830,6 +830,30 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(15);
 /// after saving the position.
 static FLUSH_PLACE: AtomicBool = AtomicBool::new(false);
 
+/// Which figure last played, for `resume = last`. See [`LastPlayed`].
+static LAST_PLAYED: CsMutex<RefCell<LastPlayed>> = CsMutex::new(RefCell::new(LastPlayed::new()));
+
+/// Whether every story resumes (`resume = every`), or only the last figure's.
+pub(crate) fn resume_every() -> bool {
+    critical_section::with(|cs| SETTINGS.borrow_ref(cs).config().resume_every)
+}
+
+/// The page the card recorded at shutdown for this figure, if it is still the
+/// last one played (`resume = last` only).
+pub(crate) fn last_played_page(tag: TagUid) -> Option<u32> {
+    critical_section::with(|cs| LAST_PLAYED.borrow_ref(cs).from_card(tag.ruid()))
+}
+
+/// Reads `LASTPLAY.TXT` once the card is mounted.
+fn load_last_played(card: &storage::Mounted) {
+    let mut buffer = [0u8; teddiebox_core::place::MAX_LAST];
+    let on_card = card
+        .read_last_played(&mut buffer)
+        .and_then(|len| core::str::from_utf8(&buffer[..len]).ok())
+        .and_then(teddiebox_core::place::parse_last);
+    critical_section::with(|cs| LAST_PLAYED.borrow_ref_mut(cs).loaded(on_card));
+}
+
 /// The place a figure was lifted from, before the card knows about it.
 ///
 /// The rules live in [`PendingPlace`], where host tests cover them; this is
@@ -1065,6 +1089,7 @@ fn read_configuration_once(card: &storage::Mounted, done: &mut bool) {
     *done = true;
 
     read_anchor(card);
+    load_last_played(card);
 
     let mut buffer = [0u8; CONFIG_BUFFER];
     match card.read_config(&mut buffer) {
@@ -1097,7 +1122,9 @@ fn remember_in_ram(index: &CardIndex<'_>, tag: TagUid, page: u32) {
     let displaced =
         critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).remember(tag, page));
     if let Some((held, held_page)) = displaced {
-        write_place(index, held, held_page, "making room");
+        if resume_every() {
+            write_place(index, held, held_page, "making room");
+        }
     }
     esp_println::println!(
         "teddiebox: plate holding {:016X} at page {page}",
@@ -1127,6 +1154,19 @@ fn forget_place(ruid: u64) {
 /// writes nothing.
 fn flush_place(index: &CardIndex<'_>, why: &str) {
     let held = critical_section::with(|cs| PENDING_PLACE.borrow_ref_mut(cs).take());
+    if !resume_every() {
+        // One record for the whole box, as on a stock box. Written even when
+        // nothing is held, so a story that ended does not resume next time.
+        let mut out = [0u8; teddiebox_core::place::MAX_LAST];
+        let len = held.map_or(0, |(tag, page)| {
+            teddiebox_core::place::render_last(tag.ruid(), page, &mut out)
+        });
+        match index.card().write_last_played(&out[..len]) {
+            Ok(()) => esp_println::println!("teddiebox: plate wrote the last figure — {why}"),
+            Err(reason) => esp_println::println!("teddiebox: plate place not saved — {reason}"),
+        }
+        return;
+    }
     if let Some((tag, page)) = held {
         write_place(index, tag, page, why);
     }
@@ -1151,6 +1191,29 @@ fn write_place(index: &CardIndex<'_>, tag: TagUid, page: u32, why: &str) {
 fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
     match action {
         Action::Play { tag, from } => {
+            // Stock: a different figure playing starts the earlier one over.
+            if !resume_every()
+                && critical_section::with(|cs| LAST_PLAYED.borrow_ref_mut(cs).playing(tag.ruid()))
+            {
+                let dropped = critical_section::with(|cs| {
+                    let mut places = PENDING_PLACE.borrow_ref_mut(cs);
+                    let held = places.take();
+                    // `take` empties the slot; put back a place for this
+                    // figure, which `playing` says is not the case.
+                    if let Some((seen, page)) = held {
+                        if seen == tag {
+                            places.remember(seen, page);
+                        }
+                    }
+                    held.filter(|(seen, _)| *seen != tag)
+                });
+                if let Some((seen, _)) = dropped {
+                    esp_println::println!(
+                        "teddiebox: plate {:016X} starts over next time — another figure played",
+                        seen.ruid()
+                    );
+                }
+            }
             let path = teddiebox_download::content_path(tag.0);
             // Both kinds are under `CONTENT/`. The request says which, since a
             // download's position is saved apart from stock content.
