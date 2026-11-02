@@ -30,6 +30,8 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use teddiebox_config::{Config, Settings};
 use teddiebox_console::{MAX_PASSPHRASE, MAX_SSID};
@@ -334,6 +336,13 @@ pub(crate) fn already_asked(tag: TagUid) -> bool {
 const DOWNLOAD_PIPE_BYTES: usize = 8192;
 static DOWNLOAD_PIPE: CsMutex<RefCell<Pipe<DOWNLOAD_PIPE_BYTES>>> =
     CsMutex::new(RefCell::new(Pipe::new()));
+
+/// Raised by the network task when it puts bytes in [`DOWNLOAD_PIPE`], so the
+/// media task drains them now instead of at its next poll.
+pub(crate) static PIPE_FILLED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+/// Raised by the media task when it takes bytes out of [`DOWNLOAD_PIPE`], so a
+/// network task waiting on a full pipe resumes at once.
+pub(crate) static PIPE_DRAINED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// How often the producer looks for an answer while a handshake is in
 /// progress.
@@ -658,11 +667,13 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     };
     let mut buf = [0u8; 512];
     let mut failed = None;
+    let mut drained = false;
     loop {
         let taken = critical_section::with(|cs| DOWNLOAD_PIPE.borrow_ref_mut(cs).read(&mut buf));
         if taken == 0 {
             break;
         }
+        drained = true;
         if dropping {
             continue;
         }
@@ -671,6 +682,9 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             break;
         }
         active.crc.update(&buf[..taken]);
+    }
+    if drained {
+        PIPE_DRAINED.signal(());
     }
     // Nothing may wait in a batch once this pass stops writing.
     let finished = card.finish_appends();
@@ -1747,9 +1761,17 @@ async fn handle_idle(
     // Serviced when idle, so a download progresses in the gaps without
     // blocking the loop.
     let downloading = service_download(card, download);
-    // A late drain stalls the socket, so poll fast while downloading.
-    let gap = if downloading { 5 } else { 100 };
-    Timer::after(Duration::from_millis(gap)).await;
+    // A late drain stalls the socket: while downloading, wake as soon as the
+    // network fills the pipe, with the poll as a fallback.
+    if downloading {
+        select(
+            Timer::after(Duration::from_millis(5)),
+            PIPE_FILLED.wait(),
+        )
+        .await;
+    } else {
+        Timer::after(Duration::from_millis(100)).await;
+    }
 }
 
 /// Applies whatever this pass's [`gather_events`] found to the reducer, if
@@ -2445,7 +2467,7 @@ async fn fetch_story(
         )
     };
     let mut into_pipe = |bytes: &[u8]| -> usize {
-        critical_section::with(|cs| {
+        let taken = critical_section::with(|cs| {
             // Nobody is reading the pipe. Discard the rest so the download
             // ends instead of blocking for ever.
             let mut transfer = TRANSFER.borrow_ref_mut(cs);
@@ -2455,7 +2477,11 @@ async fn fetch_story(
             let taken = DOWNLOAD_PIPE.borrow_ref_mut(cs).write(bytes);
             transfer.sent(taken as u32);
             taken
-        })
+        });
+        if taken > 0 {
+            PIPE_FILLED.signal(());
+        }
+        taken
     };
     let wanted = tls::Wanted {
         server,

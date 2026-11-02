@@ -1004,10 +1004,16 @@ async fn hand_over(bytes: &[u8], sink: &mut dyn FnMut(&[u8]) -> usize) {
         let taken = sink(&bytes[at..]);
         at += taken;
         if taken == 0 {
-            // Wait about as long as the consumer takes. Retrying more often
-            // takes more critical sections, which block interrupts, including
-            // the one that keeps the audio DMA fed.
-            Timer::after(Duration::from_millis(20)).await;
+            // Resume as soon as the consumer has drained some of the pipe,
+            // rather than polling: retrying blindly takes critical sections,
+            // which block interrupts, including the one that keeps the audio
+            // DMA fed. The timer only covers a pipe nobody is draining.
+            crate::PIPE_DRAINED.reset();
+            let _ = embassy_futures::select::select(
+                crate::PIPE_DRAINED.wait(),
+                Timer::after(Duration::from_millis(20)),
+            )
+            .await;
         }
     }
 }
