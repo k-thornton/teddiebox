@@ -402,12 +402,6 @@ impl Client {
         Ok(())
     }
 
-    /// Whether the next connection can resume a session instead of running a
-    /// full handshake.
-    pub fn can_resume(&self) -> bool {
-        self.resumable.borrow().is_some()
-    }
-
     /// Does the first private-key operation now, so no handshake has to.
     ///
     /// The first operation sets up RSA blinding, which blocks this executor

@@ -121,7 +121,9 @@ pub enum Action {
     /// Ask the server whether the story cached for this figure is still
     /// current.
     ///
-    /// Sent alongside `Play`, and answered by [`Event::Revalidated`]. A stale
+    /// Sent once the story stops playing (lifted or ended), never during it:
+    /// on one core, bringing Wi-Fi up stalls the audio. Answered by
+    /// [`Event::Revalidated`]. A stale
     /// story is replaced on the next placement, not while it plays: that would
     /// need two open handles on one file and a rename, and the SD card library
     /// supports neither.

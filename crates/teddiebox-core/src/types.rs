@@ -21,6 +21,13 @@ impl TagUid {
         bytes.reverse();
         u64::from_be_bytes(bytes)
     }
+
+    /// The inverse of [`Self::ruid`].
+    pub fn from_ruid(ruid: u64) -> Self {
+        let mut bytes = ruid.to_be_bytes();
+        bytes.reverse();
+        Self(bytes)
+    }
 }
 
 /// Where a story should resume.
@@ -181,6 +188,13 @@ pub enum PowerOffReason {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_ruid_turns_back_into_the_same_tag() {
+        let tag = TagUid([0xE0, 0x04, 0x03, 0x50, 0x20, 0x56, 0x39, 0x0D]);
+        assert_eq!(tag.ruid(), 0x0D39_5620_5003_04E0);
+        assert_eq!(TagUid::from_ruid(tag.ruid()), tag);
+    }
+
     use super::*;
 
     #[test]

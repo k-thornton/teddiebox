@@ -155,8 +155,8 @@ impl ContentIndex for CardIndex<'_> {
         available
     }
 
-    /// Whether this figure's story should be checked against the server
-    /// while it plays.
+    /// Whether this figure's story should be checked against the server once
+    /// it stops playing.
     ///
     /// No check is needed for:
     /// - **Stock content**: a file under `CONTENT/` has no sidecar and was

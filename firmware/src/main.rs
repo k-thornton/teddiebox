@@ -293,6 +293,12 @@ fn take_stale(dir: u32, file: u32) -> bool {
     })
 }
 
+/// The last figure placed and its token, kept after it is lifted: its story
+/// is checked with the server once it stops playing, usually at the lift,
+/// when [`Placed`] no longer has the token.
+static LAST_TOKEN: CsMutex<RefCell<(TagUid, Option<[u8; 32]>)>> =
+    CsMutex::new(RefCell::new((TagUid([0; 8]), None)));
+
 /// Whether a probe this session has contradicted this cache entry. Unlike
 /// [`take_stale`], this only looks.
 pub(crate) fn marked_stale(dir: u32, file: u32) -> bool {
@@ -1312,6 +1318,14 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 
         Action::Revalidate(tag) => {
             let ruid = tag.ruid();
+            // Usually sent at the lift, when the figure's token is gone from
+            // `Placed`; the one kept at placement is used instead.
+            let token = token.or_else(|| {
+                critical_section::with(|cs| {
+                    let (seen, kept) = *LAST_TOKEN.borrow_ref(cs);
+                    (seen == tag).then_some(kept).flatten()
+                })
+            });
             esp_println::println!("teddiebox: plate asking the server about {ruid:016X}");
             critical_section::with(|cs| {
                 REVALIDATION
@@ -1385,6 +1399,9 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
 /// before it ends.
 fn take_plate_event(placed: &mut Placed) -> Option<Event> {
     let event = placed.observe(nfc::PLATE_TAG.try_take()?);
+    if let Event::TagPresent(tag) = event {
+        critical_section::with(|cs| *LAST_TOKEN.borrow_ref_mut(cs) = (tag, placed.token()));
+    }
     // A lift cancels any open question about the figure, as soon as it is
     // seen. Later in the pass, the figure might already be back on the box.
     if event == Event::TagAbsent {
@@ -1502,22 +1519,19 @@ fn gather_revalidation(card: Option<&storage::Mounted>, placed: &Placed) -> Opti
         ruid: probed_ruid,
         answer,
     } = settled?;
-    match placed.answering(probed_ruid).resolve(|tag| {
-        // Remembered whatever the answer: a server that was just
-        // unreachable will likely stay so for the session, and asking
-        // again wastes the radio.
-        critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
-        Event::Revalidated(tag, freshness_of(answer, tag, card))
-    }) {
+    // Acted on whether or not the figure is still on the plate: the
+    // question is asked once its story stops, usually because it was lifted.
+    // Remembered whatever the answer: a server that was just unreachable
+    // will likely stay so for the session, and asking again wastes the
+    // radio. A stale story is marked for its next placement.
+    critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
+    let freshness = freshness_of(answer, TagUid::from_ruid(probed_ruid), card);
+    match placed
+        .answering(probed_ruid)
+        .resolve(|tag| Event::Revalidated(tag, freshness))
+    {
         Settlement::ForTheFigure(event) => Some(event),
-        Settlement::ForAnotherFigure => {
-            esp_println::println!(
-                "teddiebox: plate ignoring an answer about {probed_ruid:016X} — \
-                 not the figure on the plate"
-            );
-            None
-        }
-        Settlement::NothingWaiting => None,
+        Settlement::ForAnotherFigure | Settlement::NothingWaiting => None,
     }
 }
 
@@ -2146,18 +2160,9 @@ async fn serve_get_while_connected(
             None => {
                 esp_println::println!("teddiebox: get has no request queued — nothing to fetch")
             }
-            // A probe goes out while its story starts playing, and a full
-            // handshake blocks this executor for about 1.25 s, far longer than
-            // the audio buffer. Only a resumed one (57 ms) is safe, so without
-            // a session to resume the figure goes unasked this session.
             Some(FetchRequest {
                 ruid, probe: true, ..
-            }) if !tls.can_resume() => {
-                esp_println::println!(
-                    "teddiebox: ask {ruid:016X} skipped — no session to resume while playing"
-                );
-                probe_ended(ruid);
-            }
+            }) if !quiet_for_probe(ruid).await => {}
             Some(FetchRequest {
                 ruid,
                 token,
@@ -2663,6 +2668,24 @@ async fn scan_and_report(radio: &mut net::Radio<'_>) {
 /// The radio is switched on for it and off again afterwards: the box is
 /// read less reliably while the radio runs, and there is no other reason to
 /// stay connected.
+/// Whether a probe may run now: only once nothing plays.
+///
+/// The probe is sent as its story stops, so allow the audio a moment to wind
+/// down. If something plays after that (another figure went on), the question
+/// is withdrawn unanswered, so the figure is asked about at its next lift:
+/// on one core, bringing Wi-Fi up stalls the audio for over half a second.
+async fn quiet_for_probe(ruid: u64) -> bool {
+    for _ in 0..10 {
+        if !PLAYING.load(Ordering::Relaxed) {
+            return true;
+        }
+        Timer::after(Duration::from_millis(30)).await;
+    }
+    esp_println::println!("teddiebox: ask {ruid:016X} put off — something is playing");
+    critical_section::with(|cs| REVALIDATION.borrow_ref_mut(cs).withdrawn());
+    false
+}
+
 async fn serve_get(
     radio: &mut net::Radio<'_>,
     tls: Option<&tls::Client>,
@@ -2674,6 +2697,9 @@ async fn serve_get(
         esp_println::println!("teddiebox: get has no request queued — nothing to fetch");
         return;
     };
+    if probe && !quiet_for_probe(ruid).await {
+        return;
+    }
     // Recorded before anything can end the fetch.
     transfer(|t| t.start(ruid));
     esp_println::println!(

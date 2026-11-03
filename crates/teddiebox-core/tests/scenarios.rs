@@ -141,11 +141,11 @@ fn a_cached_story_the_server_has_changed_is_fetched_on_the_next_placement() {
         stale: false,
     };
 
-    // When: the figure goes on, the server says the story has changed, the
-    // figure comes off and goes back on, and the download finishes
+    // When: the figure goes on and comes off, the server says the story has
+    // changed, the figure goes back on, and the download finishes
     let placed = core.handle(Event::TagPresent(TAG), &cached);
+    let lifted = core.handle(Event::TagAbsent, &cached);
     let stale = core.handle(Event::Revalidated(TAG, Freshness::Stale), &cached);
-    core.handle(Event::TagAbsent, &cached);
     cached.unchecked = false;
     cached.stale = true;
     let replaced = core.handle(Event::TagPresent(TAG), &cached);
@@ -158,7 +158,8 @@ fn a_cached_story_the_server_has_changed_is_fetched_on_the_next_placement() {
         from: Position::Exact { page: 412 },
     };
     assert!(has(&placed, play));
-    assert!(has(&placed, Action::Revalidate(TAG)));
+    assert!(!has(&placed, Action::Revalidate(TAG)));
+    assert!(has(&lifted, Action::Revalidate(TAG)));
     assert!(
         !stale
             .iter()

@@ -63,6 +63,10 @@ pub enum Unavailable {
 pub struct Playback {
     state: State,
     position: Position,
+    /// The playing figure, if its story still needs checking with the
+    /// server. Asked once nothing plays: on one core, bringing Wi-Fi up
+    /// stalls the audio.
+    unchecked: Option<TagUid>,
 }
 
 impl Default for Playback {
@@ -70,6 +74,7 @@ impl Default for Playback {
         Self {
             state: State::Idle,
             position: Position::default(),
+            unchecked: None,
         }
     }
 }
@@ -110,13 +115,11 @@ impl Playback {
             self.position = from;
             self.state = State::Playing(tag);
             let _ = actions.push(Action::Play { tag, from });
-            // Play first, ask alongside. A newer story replaces this one on
-            // the next placement: replacing a file while it plays would need
-            // two handles on one file and a rename, and `embedded-sdmmc`
+            // Play first, ask once it stops. A newer story replaces this one
+            // on the next placement: replacing a file while it plays would
+            // need two handles on one file and a rename, and `embedded-sdmmc`
             // supports neither.
-            if index.wants_revalidation(tag) {
-                let _ = actions.push(Action::Revalidate(tag));
-            }
+            self.unchecked = index.wants_revalidation(tag).then_some(tag);
         } else {
             self.state = State::Fetching(tag);
             let _ = actions.push(Action::RequestContent(tag));
@@ -133,6 +136,7 @@ impl Playback {
                     pos: self.position,
                 });
                 let _ = actions.push(Action::Pause);
+                self.ask_if_unchecked(tag, &mut actions);
             }
             // Stop the download. The partial file keeps its sidecar, so
             // placing the figure again resumes instead of starting over.
@@ -147,7 +151,7 @@ impl Playback {
 
     /// What the server said about a cached story.
     ///
-    /// The story is already playing by the time this arrives, so nothing
+    /// The story has already played by the time this arrives, so nothing
     /// changes now. A stale story is marked by the firmware, and
     /// [`ContentIndex::is_stale`] sends the next placement to the network.
     pub fn on_revalidated(&mut self, _tag: TagUid, _freshness: Freshness) -> Actions {
@@ -176,10 +180,20 @@ impl Playback {
     /// Only a playing story can end. A download in progress is left alone,
     /// because the sound that finished was something else.
     pub fn on_playback_ended(&mut self) -> Actions {
-        if matches!(self.state, State::Playing(_)) {
+        let mut actions = Actions::new();
+        if let State::Playing(tag) = self.state {
             self.state = State::Idle;
+            self.ask_if_unchecked(tag, &mut actions);
         }
-        Actions::new()
+        actions
+    }
+
+    /// Asks the server about a story that just stopped playing, if it still
+    /// needs asking.
+    fn ask_if_unchecked(&mut self, tag: TagUid, actions: &mut Actions) {
+        if self.unchecked.take() == Some(tag) {
+            let _ = actions.push(Action::Revalidate(tag));
+        }
     }
 
     pub fn on_content_missing(&mut self, tag: TagUid, why: Unavailable) -> Actions {
@@ -255,10 +269,10 @@ mod tests {
         }
     }
 
-    /// A cached story that may be out of date plays at once, and the server
-    /// is asked about it alongside.
+    /// A cached story that may be out of date plays at once. Nothing is
+    /// asked while it plays: on one core, Wi-Fi coming up stalls the audio.
     #[test]
-    fn a_figure_that_has_not_been_asked_about_plays_and_is_asked_about() {
+    fn a_figure_that_has_not_been_asked_about_plays_without_asking() {
         // Given
         let mut p = Playback::new();
 
@@ -268,32 +282,84 @@ mod tests {
         // Then
         assert_eq!(
             actions.as_slice(),
-            &[
-                Action::Play {
-                    tag: TAG,
-                    from: Position::Exact { page: 412 }
-                },
-                Action::Revalidate(TAG)
-            ]
+            &[Action::Play {
+                tag: TAG,
+                from: Position::Exact { page: 412 }
+            }]
         );
         assert_eq!(p.kind(), PlaybackKind::Playing);
     }
 
-    /// The answer arrives while the story plays. Neither answer interrupts
-    /// it; a stale story is replaced on the next placement.
+    /// Lifting the figure is when the server is asked.
     #[test]
-    fn an_answer_does_not_interrupt_the_story() {
+    fn lifting_an_unchecked_figure_asks_about_it() {
+        // Given
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(412));
+        p.note_position(Position::Exact { page: 500 });
+
+        // When
+        let actions = p.on_tag_absent();
+
+        // Then
+        assert_eq!(
+            actions.as_slice(),
+            &[
+                Action::SavePosition {
+                    tag: TAG,
+                    pos: Position::Exact { page: 500 }
+                },
+                Action::Pause,
+                Action::Revalidate(TAG)
+            ]
+        );
+    }
+
+    /// A story that plays to its end is asked about then.
+    #[test]
+    fn an_unchecked_story_that_ends_is_asked_about() {
+        // Given
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(1));
+
+        // When
+        let actions = p.on_playback_ended();
+
+        // Then
+        assert_eq!(actions.as_slice(), &[Action::Revalidate(TAG)]);
+    }
+
+    /// Asked once: a second lift does not ask again.
+    #[test]
+    fn a_figure_is_asked_about_once_per_placement() {
+        // Given
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &unchecked(1));
+        p.on_tag_absent();
+        p.on_tag_present(TAG, &known(1));
+
+        // When
+        let actions = p.on_tag_absent();
+
+        // Then
+        assert!(!actions.contains(&Action::Revalidate(TAG)), "{actions:?}");
+    }
+
+    /// The answer changes nothing at once; a stale story is replaced on the
+    /// next placement.
+    #[test]
+    fn an_answer_changes_nothing_at_once() {
         for freshness in [Freshness::Current, Freshness::Stale] {
             // Given
             let mut p = Playback::new();
             p.on_tag_present(TAG, &unchecked(412));
+            p.on_tag_absent();
 
             // When
             let actions = p.on_revalidated(TAG, freshness);
 
             // Then
             assert!(actions.as_slice().is_empty(), "{freshness:?}");
-            assert_eq!(p.kind(), PlaybackKind::Playing);
         }
     }
 
