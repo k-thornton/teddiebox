@@ -2725,7 +2725,10 @@ async fn serve_get(
     // figure silent until it hears back, and a network failure is no
     // reason not to play the card's copy.
     if probe {
-        if !answer_waiting() {
+        // Only an open question needs an answer: one put off for playback
+        // was withdrawn, and answering it would only log a late answer.
+        let open = critical_section::with(|cs| REVALIDATION.borrow_ref(cs).is_open(ruid));
+        if open && !answer_waiting() {
             esp_println::println!("teddiebox: net would not come up to ask — playing what is here");
             probe_ended(ruid);
         }

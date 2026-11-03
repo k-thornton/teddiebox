@@ -157,6 +157,12 @@ impl Revalidation {
         self.state = State::Idle;
     }
 
+    /// Whether a question about this figure is still open, neither settled
+    /// nor withdrawn.
+    pub fn is_open(&self, ruid: u64) -> bool {
+        matches!(self.state, State::Asking { ruid: open, .. } if open == ruid)
+    }
+
     /// The clock has been read with no answer yet.
     ///
     /// Takes the current time rather than an interval, like
@@ -541,5 +547,21 @@ mod tests {
 
         // Then
         assert!(now >= 10_000, "gave up early, at {now} ms");
+    }
+
+    #[test]
+    fn a_question_is_open_until_it_is_withdrawn() {
+        // Given
+        let mut r = Revalidation::new();
+        r.asked(7, 0);
+
+        // When
+        let before = r.is_open(7);
+        r.withdrawn();
+
+        // Then
+        assert!(before);
+        assert!(!r.is_open(7));
+        assert!(!Revalidation::new().is_open(7));
     }
 }
