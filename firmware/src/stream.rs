@@ -46,7 +46,16 @@ struct Stream {
     failed: bool,
     /// The head start has been reported once.
     announced: bool,
+    /// Downloads restarted after stopping short under this playback.
+    retries: u32,
+    /// When the next restart is due, in the box's millisecond clock.
+    retry_due_ms: Option<u64>,
 }
+
+/// How many times a download that stops short under a playing story is
+/// restarted before the story is allowed to run dry: 1, 2, 4 and 8 s apart,
+/// as a stock box does. Progress resets the count.
+const RETRIES: u32 = 4;
 
 static STREAM: CsMutex<RefCell<Option<Stream>>> = CsMutex::new(RefCell::new(None));
 
@@ -57,6 +66,14 @@ fn with<R>(f: impl FnOnce(&mut Option<Stream>) -> R) -> R {
 /// A download has opened `CONTENT/<directory>/<file>` and will append from `at`.
 pub fn begin(directory: u32, file: u32, handle: RawFile, at: u32, total: Option<u32>) {
     with(|s| {
+        // A restart under a playback keeps that playback's handle and its
+        // retry count; everything about the writer starts afresh.
+        let (handle, reader_open, retries, announced) = match *s {
+            Some(held) if (held.directory, held.file) == (directory, file) && held.reader_open => {
+                (held.handle, true, held.retries, true)
+            }
+            _ => (handle, false, 0, false),
+        };
         *s = Some(Stream {
             directory,
             file,
@@ -65,11 +82,70 @@ pub fn begin(directory: u32, file: u32, handle: RawFile, at: u32, total: Option<
             written: at,
             total,
             writer_open: true,
-            reader_open: false,
+            reader_open,
             complete: false,
             failed: false,
-            announced: false,
+            announced,
+            retries,
+            retry_due_ms: None,
         })
+    });
+}
+
+/// How much of this story is on the card, while a download or playback
+/// holds its file open and the card cannot be asked.
+pub fn written_for(directory: u32, file: u32) -> Option<u32> {
+    with(|s| {
+        s.filter(|s| (s.directory, s.file) == (directory, file))
+            .map(|s| s.written)
+    })
+}
+
+/// The handle a playback of this story still reads through, for a download
+/// restarting under it: the card cannot open the file a second time.
+pub fn handle_for_resume(directory: u32, file: u32) -> Option<RawFile> {
+    with(|s| {
+        s.filter(|s| (s.directory, s.file) == (directory, file) && s.reader_open && !s.writer_open)
+            .map(|s| s.handle)
+    })
+}
+
+/// The writer stopped short under a playback. Returns how long to wait
+/// before restarting it, or `None` once the retries are used up.
+pub fn schedule_retry(now_ms: u64) -> Option<u64> {
+    with(|s| {
+        let s = s.as_mut()?;
+        if !s.reader_open || s.retries >= RETRIES {
+            return None;
+        }
+        let delay = 1_000u64 << s.retries;
+        s.retries += 1;
+        s.retry_due_ms = Some(now_ms.saturating_add(delay));
+        Some(delay)
+    })
+}
+
+/// Whether a scheduled restart is due now. Answers yes once.
+pub fn take_due_retry(now_ms: u64) -> bool {
+    with(|s| {
+        let Some(s) = s else { return false };
+        match s.retry_due_ms {
+            Some(due) if now_ms >= due => {
+                s.retry_due_ms = None;
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// No more restarts: the decoder may run dry at the end of what landed.
+pub fn stop_retrying() {
+    with(|s| {
+        if let Some(s) = s {
+            s.retry_due_ms = None;
+            s.retries = RETRIES;
+        }
     });
 }
 
@@ -78,6 +154,10 @@ pub fn advance(written_this_body: u32) {
     with(|s| {
         if let Some(s) = s {
             s.written = s.at.saturating_add(written_this_body);
+            if written_this_body > 0 {
+                // Bytes are arriving again: a later stop starts the count over.
+                s.retries = 0;
+            }
         }
     });
 }
@@ -206,7 +286,8 @@ pub fn gate(directory: u32, file: u32, page: u32) -> Gate {
         let watermark = Pages(stream.written / PAGE_SIZE as u32);
         if may_decode(Pages(page), watermark, MARGIN, stream.complete) {
             Gate::Go
-        } else if stream.writer_open {
+        } else if stream.writer_open || stream.retry_due_ms.is_some() {
+            // Still writing, or about to start again.
             Gate::Wait
         } else {
             Gate::Lost

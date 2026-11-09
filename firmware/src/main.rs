@@ -534,12 +534,16 @@ fn plan_download(card: Option<&storage::Mounted>, path: ContentPath) -> Plan {
         return plan;
     };
 
-    let length_on_card = card.audio_length(dir, file);
+    // While a playback holds the file, the card cannot be asked; the stream
+    // knows how far the last writer got.
+    let length_on_card = stream::written_for(dir, file).or_else(|| card.audio_length(dir, file));
     plan.on_card = length_on_card.unwrap_or(0);
     // The version of what is on the card, for the net task to check before
     // it continues a partial file (see `fetch_story`).
-    let partial_id = CardIndex::new(card)
-        .audio_id(TagUid::from_ruid(((dir as u64) << 32) | file as u64))
+    let partial_id = audio::played_audio_id(dir, file)
+        .or_else(|| {
+            CardIndex::new(card).audio_id(TagUid::from_ruid(((dir as u64) << 32) | file as u64))
+        })
         .unwrap_or(0);
     PARTIAL_AUDIO_ID.store(partial_id, Ordering::Relaxed);
 
@@ -597,6 +601,12 @@ fn write_sidecar(
 /// Returns whether a download is still in flight, so the caller can poll
 /// faster while one is.
 fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWrite>) -> bool {
+    // A download that stopped short under a playing story, due to start
+    // again. The request it repeats is still in `FETCH_REQUEST`.
+    if stream::take_due_retry(Instant::now().as_millis()) {
+        esp_println::println!("teddiebox: get trying again");
+        NET_REQUEST.store(NET_GET, Ordering::Relaxed);
+    }
     let writing = write.is_some();
     let work = transfer(|t| t.next(writing));
     let dropping = work == Work::Drop;
@@ -619,10 +629,17 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         } => {
             let (dir, file) = (path.directory, path.file);
             let opened = card.ok_or("the card is not mounted").and_then(|card| {
-                match placement {
-                    Placement::Restart => card.open_download_for_write(dir, file),
-                    Placement::Continue => card.open_download_for_append(dir, file),
-                    Placement::Refuse => {
+                match (placement, stream::handle_for_resume(dir, file)) {
+                    // A download restarting under the story it feeds: the
+                    // card cannot open the file twice, so it continues
+                    // through the handle the playback reads from.
+                    (Placement::Continue, Some(handle)) => Ok(handle),
+                    (_, Some(_)) => Err(
+                        "the story changed while it plays; it starts over on its next placement",
+                    ),
+                    (Placement::Restart, None) => card.open_download_for_write(dir, file),
+                    (Placement::Continue, None) => card.open_download_for_append(dir, file),
+                    (Placement::Refuse, None) => {
                         Err("the server answered with a range this file cannot take")
                     }
                 }
@@ -670,6 +687,7 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                     // would wait for ever and the box would look hung.
                     esp_println::println!("teddiebox: get cannot write — {reason}");
                     transfer(Transfer::open_failed);
+                    stream::stop_retrying();
                     return false;
                 }
             }
@@ -742,6 +760,11 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
             finished.at.saturating_add(finished.written),
             finished.total.unwrap_or(0)
         );
+        // Under a playing story the download is started again, as a stock
+        // box does, while the story plays on from what has landed.
+        if let Some(delay) = stream::schedule_retry(Instant::now().as_millis()) {
+            esp_println::println!("teddiebox: get trying again in {delay} ms");
+        }
     }
     false
 }
