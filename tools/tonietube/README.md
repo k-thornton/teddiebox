@@ -4,14 +4,16 @@ YouTube playlists on Toniebox cards, through TeddyCloud. No Google account
 involved: yt-dlp lists and downloads anonymously, so playlists must be
 **public or unlisted** (not private). Single videos work too.
 
-`cards.toml` maps a card UID to a URL:
+`cards.toml` maps a card UID to a URL (`cards.example.toml` shows the
+format; the real file lives beside the service's state and is edited by the
+web page, so it is not in the repository):
 
 ```toml
 [cards]
 "E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"
 ```
 
-The web page at `http://<server>:8080/` lists every card TeddyCloud has seen,
+The web page at `http://<server>:8080/` is the normal way to assign cards. It lists every card TeddyCloud has seen,
 takes a playlist or video URL for each, shows the title, chapter count and
 last render, and has a "render again" button. It edits the same `cards.toml`
 and wakes the service, so an assignment renders within a couple of minutes.

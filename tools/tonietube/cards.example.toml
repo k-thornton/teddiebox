@@ -9,4 +9,4 @@ library_dir = "tonietube"   # folder inside TeddyCloud's library
 bitrate = 96                # kbps Opus in the TAF (stock tonies use 96)
 
 [cards]
-"E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"
+# "E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"
