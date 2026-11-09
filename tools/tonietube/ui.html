@@ -18,6 +18,7 @@
   .ok { color: var(--ok); }
   form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   input[type=url] { flex: 1 1 260px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--fg); font: inherit; }
+  input[type=text] { flex: 0 1 180px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--fg); font: inherit; }
   button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--accent); font: inherit; cursor: pointer; }
   button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   button:disabled { opacity: .5; cursor: default; }
@@ -25,7 +26,7 @@
 </style>
 </head>
 <body>
-<p class="hint">Tap a new card on the box once, then paste a YouTube playlist or video URL for it here. A render takes a minute or two; playlist edits are picked up on their own.</p>
+<p class="hint">Tap a new card on the box once, then paste a YouTube playlist or video URL for it here, with a name if you like. A render takes a minute or two; playlist edits are picked up on their own.</p>
 <div id="cards"><p class="empty">Loading…</p></div>
 <script>
 // Everything goes through TeddyCloud: its tag list for the cards, and two
@@ -57,10 +58,12 @@ async function load() {
   const cards = tags.map(t => {
     const info = t.tonieInfo || {};
     const s = status.cards[t.ruid] || {};
-    const url = t.ruid in pending ? pending[t.ruid] : s.url;
-    if (t.ruid in pending && (s.url || null) === (pending[t.ruid] || null)) delete pending[t.ruid];
-    return { uid: t.uid, ruid: t.ruid, url, source: t.source || "", tracks: (t.trackSeconds || []).length,
-      tonie: [info.series, info.episode].filter(Boolean).join(" "), ...s, url, busy: s.busy || pendingRender.has(t.ruid) };
+    const p = pending[t.ruid];
+    const url = t.ruid in pending ? (p && p.url) : s.url;
+    const name = t.ruid in pending ? (p && p.name) : s.name;
+    if (t.ruid in pending && (s.url || null) === ((p && p.url) || null) && (s.name || "") === ((p && p.name) || "")) delete pending[t.ruid];
+    return { uid: t.uid, ruid: t.ruid, source: t.source || "", tracks: (t.trackSeconds || []).length,
+      tonie: [info.series, info.episode].filter(Boolean).join(" "), ...s, url, name, busy: s.busy || pendingRender.has(t.ruid) };
   });
   // Mapped cards TeddyCloud has not seen yet still show.
   for (const [ruid, s] of Object.entries(status.cards)) {
@@ -80,10 +83,11 @@ async function load() {
       : c.source ? `<span class="meta">${esc(c.tracks)} chapters from ${esc(c.source)}</span>`
       : '<span class="meta">nothing assigned yet</span>';
     el.innerHTML = `
-      <div class="row"><span class="title">${esc(c.title || c.tonie || "Card")}</span><span class="uid">${esc(c.uid)}</span></div>
+      <div class="row"><span class="title">${esc(c.name || c.title || c.tonie || "Card")}</span><span class="uid">${esc(c.uid)}</span>${c.name && c.title ? `<span class="meta">${esc(c.title)}</span>` : ""}</div>
       <div>${state}</div>
       <form data-uid="${esc(c.uid)}" data-ruid="${esc(c.ruid)}">
-        <input type="url" name="url" placeholder="https://youtube.com/playlist?list=…" value="${esc(c.url || "")}" required pattern="https?://([a-z0-9-]+\\.)*(youtube\\.com|youtu\\.be)/.*">
+        <input type="text" name="name" placeholder="Name" maxlength="80" value="${esc(c.name || "")}">
+        <input type="url" name="url" placeholder="https://youtube.com/playlist?list=…" value="${esc(c.url || "")}" required>
         <button class="primary" type="submit">${c.url ? "Save" : "Assign"}</button>
         ${c.url ? `<button type="button" data-render="${esc(c.ruid)}" ${c.busy ? "disabled" : ""}>Render again</button>` : ""}
         ${c.url ? `<button type="button" data-clear="${esc(c.ruid)}">Remove</button>` : ""}
@@ -95,15 +99,15 @@ async function load() {
 // The whole mapping, as the page wants it, plus any "render again" asks.
 async function send(change) {
   const cards = {};
-  for (const [ruid, s] of Object.entries(status.cards)) if (s.url) cards[s.uid] = s.url;
-  for (const [ruid, url] of Object.entries(pending)) {
+  for (const [ruid, s] of Object.entries(status.cards)) if (s.url) cards[s.uid] = { url: s.url, name: s.name || "" };
+  for (const [ruid, p] of Object.entries(pending)) {
     const uid = statusUid(ruid);
     if (!uid) continue;
-    if (url) cards[uid] = url; else delete cards[uid];
+    if (p) cards[uid] = p; else delete cards[uid];
   }
   if (change) {
-    if (change.url) cards[change.uid] = change.url; else delete cards[change.uid];
-    pending[change.ruid] = change.url || null;
+    if (change.url) cards[change.uid] = { url: change.url, name: change.name || "" }; else delete cards[change.uid];
+    pending[change.ruid] = change.url ? { url: change.url, name: change.name || "" } : null;
   }
   const body = JSON.stringify({ seq: Date.now(), cards, render: [...pendingRender] });
   const form = new FormData();
@@ -121,9 +125,10 @@ function statusUid(ruid) {
 document.addEventListener("submit", e => {
   e.preventDefault();
   const f = e.target;
-  const url = f.url.value.trim();
-  if ((status.cards[f.dataset.ruid] || {}).url === url) return; // nothing changed
-  send({ uid: f.dataset.uid, ruid: f.dataset.ruid, url });
+  const url = f.url.value.trim(), name = f.name.value.trim();
+  const now = status.cards[f.dataset.ruid] || {};
+  if (now.url === url && (now.name || "") === name) return; // nothing changed
+  send({ uid: f.dataset.uid, ruid: f.dataset.ruid, url, name });
 });
 document.addEventListener("click", e => {
   const b = e.target;

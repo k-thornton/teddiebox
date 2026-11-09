@@ -11,12 +11,17 @@ web page, so it is not in the repository):
 ```toml
 [cards]
 "E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"
+"E0:04:01:53:2A:8B:5B:E3" = { url = "https://youtube.com/playlist?list=PLxz…", name = "Bedtime songs" }
 ```
+
+A card is either a plain URL or a table with `url` and an optional `name`,
+which the page shows in place of the playlist title. A video URL that carries
+a `list=` parameter counts as its playlist.
 
 The UI is TeddyCloud's **TonieTube** page (Tonies menu, or Community → TC
 Plugins). It lists every card TeddyCloud has seen, takes a playlist or video
-URL for each, shows the title, chapter count and last render, and has a
-"render again" button. It runs entirely inside TeddyCloud: the service keeps
+URL and a name for each, shows the title, chapter count and last render, and
+has a "render again" button. It runs entirely inside TeddyCloud: the service keeps
 the page as `tonietube/ui.html` and its status as `tonietube/status.json` in
 TeddyCloud's library, and the page writes `tonietube/cards.json` there, which
 the service reads every few seconds and applies to `cards.toml`.

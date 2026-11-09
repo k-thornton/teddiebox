@@ -60,7 +60,9 @@ def load_config(path):
             cfg["teddycloud_password"] = f.read().strip()
     if cfg.get("ca_file"):  # relative to the config file
         cfg["ca_file"] = os.path.join(os.path.dirname(os.path.abspath(path)), cfg["ca_file"])
-    cfg["cards"] = {ruid(uid): url for uid, url in cfg["cards"].items()}
+    # A card is `"UID" = "url"`, or `"UID" = { url = "…", name = "…" }` when
+    # it has a name of its own for the page.
+    cfg["cards"] = {ruid(uid): card_entry(value) for uid, value in cfg["cards"].items()}
     return cfg
 
 
@@ -80,32 +82,51 @@ def check_url(url):
     return url
 
 
-def set_card(path, uid, url):
+def card_entry(value):
+    """A card's config value as {"url", "name"}, from either form."""
+    if isinstance(value, dict):
+        return {"url": value.get("url"), "name": value.get("name") or None}
+    return {"url": value, "name": None}
+
+
+def check_name(name):
+    """A short, printable name for the page, or None for none."""
+    name = " ".join(str(name or "").split())
+    if len(name) > 80:
+        raise ValueError("a name is at most 80 characters")
+    return name or None
+
+
+def set_card(path, uid, url, name=None):
     """Add, change or (with url None) remove one card in cards.toml, keeping
     everything above the [cards] table as it is."""
     if not UID_FORMAT.match(uid):
         raise ValueError("a UID is eight hex bytes with colons")
     if url is not None:
         check_url(url)
+    name = check_name(name)
     with open(path) as f:
         text = f.read()
-    head, _, body = text.partition("[cards]\n")
+    with open(path, "rb") as f:
+        current = tomllib.load(f).get("cards", {})
+    head, _, _body = text.partition("[cards]\n")
     if not _:
-        head, body = text.rstrip("\n") + "\n\n", ""
-    cards = {}
-    for line in body.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        cards[ruid(key.strip().strip('"'))] = (key.strip().strip('"'), value.strip().strip('"'))
+        head = text.rstrip("\n") + "\n\n"
+    cards = {ruid(key): (key, card_entry(value)) for key, value in current.items()}
     rid = ruid(uid)
     if url is None:
         cards.pop(rid, None)
     else:
-        cards[rid] = (cards.get(rid, (uid.upper(), None))[0], url)
+        cards[rid] = (cards.get(rid, (uid.upper(), None))[0], {"url": url, "name": name})
     # json.dumps makes a valid TOML basic string: same quoting and escapes.
-    lines = [f"{json.dumps(key)} = {json.dumps(value)}" for key, value in sorted(cards.values())]
+    lines = []
+    for key, card in sorted(cards.values()):
+        if card["name"]:
+            lines.append(
+                f"{json.dumps(key)} = {{ url = {json.dumps(card['url'])}, name = {json.dumps(card['name'])} }}"
+            )
+        else:
+            lines.append(f"{json.dumps(key)} = {json.dumps(card['url'])}")
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write(head + "[cards]\n" + "\n".join(lines) + ("\n" if lines else ""))
@@ -355,7 +376,8 @@ def sync_card(cfg, state, tc, rid, url, force):
 
 
 def sync_all(cfg, state, tc, force=False, only=None):
-    for rid, url in cfg["cards"].items():
+    for rid, card in cfg["cards"].items():
+        url = card["url"]
         if only and rid not in only:
             continue
         try:
@@ -409,11 +431,12 @@ class Service:
         cfg = cfg or self.cfg()
         state = State(self.state_path)
         cards = {}
-        for rid, url in cfg["cards"].items():
+        for rid, card in cfg["cards"].items():
             known = state.get(rid)
             cards[rid] = {
                 "uid": ":".join(reversed([rid[i : i + 2] for i in range(0, 16, 2)])).upper(),
-                "url": url,
+                "url": card["url"],
+                "name": card["name"],
                 "title": known.get("title"),
                 "videos": known.get("videos"),
                 "bytes": known.get("bytes"),
@@ -450,21 +473,22 @@ class Service:
         # Each entry is checked on its own; a bad one is skipped and logged,
         # the rest still apply, and the sequence is consumed either way.
         wanted = {}
-        for uid, url in (req.get("cards") or {}).items():
-            if not url:
+        for uid, value in (req.get("cards") or {}).items():
+            entry = card_entry(value)
+            if not entry["url"]:
                 continue
             try:
                 if not UID_FORMAT.match(str(uid)):
                     raise ValueError("a UID is eight hex bytes with colons")
-                wanted[ruid(uid)] = (uid, check_url(str(url)))
+                wanted[ruid(uid)] = (uid, check_url(str(entry["url"])), check_name(entry["name"]))
             except ValueError as e:
-                log.warning("the page's request names %r with %r — ignored: %s", uid, url, e)
+                log.warning("the page's request names %r with %r — ignored: %s", uid, value, e)
         changed = False
-        for rid, (uid, url) in wanted.items():
-            if cfg["cards"].get(rid) != url:
-                set_card(self.config_path, uid, url)
+        for rid, (uid, url, name) in wanted.items():
+            if cfg["cards"].get(rid) != {"url": url, "name": name}:
+                set_card(self.config_path, uid, url, name)
                 changed = True
-                log.info("%s: the page assigned %s", rid, url)
+                log.info("%s: the page set %s (%s)", rid, url, name or "no name")
         for rid in set(cfg["cards"]) - set(wanted):
             uid = ":".join(reversed([rid[i : i + 2] for i in range(0, 16, 2)])).upper()
             set_card(self.config_path, uid, None)
