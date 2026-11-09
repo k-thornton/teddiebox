@@ -1,233 +1,88 @@
-//! One story playing while it is still being downloaded.
+//! The one story that may be playing while it downloads, shared between the
+//! download servicing and the decoder in the media task.
 //!
-//! The downloader and the decoder share one file handle, because
-//! `embedded-sdmmc` cannot open a file twice, and both run in the media task:
-//! the download is serviced between decoded frames. This records who holds
-//! the handle and how far the writer has got, so the decoder never reads a
-//! page that is not on the card yet and the handle is closed exactly once,
-//! by whichever side finishes last.
+//! The bookkeeping itself is [`teddiebox_download::Stream`], tested on the
+//! host; this holds the firmware's single instance behind a critical section
+//! and gives each side the small call it needs. The handle is the card
+//! library's, which cannot open a file twice, so both sides share it.
 
 use core::cell::RefCell;
 use critical_section::Mutex as CsMutex;
 use embedded_sdmmc::RawFile;
-use teddiebox_download::{may_decode, Pages};
-use teddiebox_taf::PAGE_SIZE;
+use teddiebox_download::{Handle, Pages, Stream};
 
-/// Pages the writer must be past the body's start before playback begins.
-///
-/// 64 pages is 256 KB, about twenty seconds at 96 kbps, and the same as the
-/// throttle's pause threshold (`PAUSE_ABOVE` in `main.rs`): the download is
-/// already pausing when audio starts. Measured with 24: three audio restarts
-/// in the first four seconds, while the radio still ran at full speed beside
-/// the decoder; none once the throttle had paused it. At the ~100 KB/s seen
-/// against teddyCloud this is about 2.5 s after the first byte.
-pub const HEAD_START: Pages = Pages(64);
+pub use teddiebox_download::{Gate, HEAD_START};
 
-/// Whole pages the writer must be past the one about to be read, so a frame
-/// that crosses a page boundary has all its bytes.
-const MARGIN: Pages = Pages(2);
+static STREAM: CsMutex<RefCell<Option<Stream<RawFile>>>> = CsMutex::new(RefCell::new(None));
 
-#[derive(Clone, Copy)]
-struct Stream {
-    directory: u32,
-    file: u32,
-    /// The shared handle, once either side has opened the file.
-    handle: Option<RawFile>,
-    /// Where this body starts in the file. Bytes before it were already there.
-    at: u32,
-    /// Bytes on the card so far, counted from the start of the file.
-    written: u32,
-    /// How long the whole file is, when the server said.
-    total: Option<u32>,
-    writer_open: bool,
-    reader_open: bool,
-    /// The writer finished, and the file is whole.
-    complete: bool,
-    /// The writer finished short. The decoder may play what there is.
-    failed: bool,
-    /// The head start has been reported once.
-    announced: bool,
-    /// Downloads restarted after stopping short under this playback.
-    retries: u32,
-    /// When the next restart is due, in the box's millisecond clock.
-    retry_due_ms: Option<u64>,
-    /// A restart has been asked for and its writer has not opened yet.
-    retrying: bool,
-    /// No more restarts: the story changed under the playback.
-    given_up: bool,
-    /// The server has confirmed this file is its version, by a download
-    /// that started from it this session. A retry need not ask again.
-    verified: bool,
-}
-
-/// The longest wait between restarts: 1, 2, 4, then 8 s and 8 s again, for
-/// as long as the story plays, as a stock box does. Progress resets it.
-const MAX_BACKOFF_SHIFT: u32 = 3;
-
-static STREAM: CsMutex<RefCell<Option<Stream>>> = CsMutex::new(RefCell::new(None));
-
-fn with<R>(f: impl FnOnce(&mut Option<Stream>) -> R) -> R {
+fn with<R>(f: impl FnOnce(&mut Option<Stream<RawFile>>) -> R) -> R {
     critical_section::with(|cs| f(&mut STREAM.borrow_ref_mut(cs)))
 }
 
 /// A download has opened `CONTENT/<directory>/<file>` and will append from `at`.
 pub fn begin(directory: u32, file: u32, handle: RawFile, at: u32, total: Option<u32>) {
-    with(|s| {
-        // A restart under a playback keeps that playback's handle and its
-        // retry count; everything about the writer starts afresh.
-        let (handle, reader_open, retries, announced) = match *s {
-            Some(held) if (held.directory, held.file) == (directory, file) && held.reader_open => {
-                (held.handle.or(Some(handle)), true, held.retries, true)
-            }
-            _ => (Some(handle), false, 0, false),
-        };
-        *s = Some(Stream {
-            directory,
-            file,
-            handle,
-            at,
-            written: at,
-            total,
-            writer_open: true,
-            reader_open,
-            complete: false,
-            failed: false,
-            announced,
-            retries,
-            retry_due_ms: None,
-            retrying: false,
-            given_up: false,
-            verified: true,
-        })
-    });
+    with(|s| *s = Some(Stream::begin(*s, directory, file, handle, at, total)));
 }
 
 /// The network could not be reached for a story the card holds part of:
 /// the partial plays, gated at its end, and the download is tried again
-/// shortly (`schedule_retry`). The playback opens the file itself and
-/// hands the handle over with [`adopt_reader`].
+/// shortly (`schedule_retry`).
 pub fn begin_offline(directory: u32, file: u32, written: u32, total: Option<u32>) {
-    with(|s| {
-        *s = Some(Stream {
-            directory,
-            file,
-            handle: None,
-            at: written,
-            written,
-            total,
-            writer_open: false,
-            reader_open: false,
-            complete: false,
-            failed: true,
-            announced: true,
-            retries: 0,
-            retry_due_ms: None,
-            retrying: false,
-            given_up: false,
-            verified: false,
-        })
-    });
+    with(|s| *s = Some(Stream::begin_offline(directory, file, written, total)));
 }
 
-/// A partial waiting for its download, which no one has opened yet: the
-/// playback about to open it must do so for writing too, and this is the
-/// file's whole length.
+/// A partial waiting for its download, which no one has opened yet, and the
+/// file's whole length: the playback opens it for writing too.
 pub fn awaiting_reader(directory: u32, file: u32) -> Option<u32> {
-    with(|s| {
-        s.filter(|s| {
-            (s.directory, s.file) == (directory, file)
-                && !s.writer_open
-                && !s.reader_open
-                && s.handle.is_none()
-        })
-        .map(|s| s.total.unwrap_or(s.written))
-    })
+    with(|s| s.as_ref()?.awaiting_reader(directory, file))
 }
 
-/// Whether the server has already confirmed this file is its version this
-/// session, so a download continuing it need not ask again.
-pub fn version_verified(directory: u32, file: u32) -> bool {
-    with(|s| s.is_some_and(|s| (s.directory, s.file) == (directory, file) && s.verified))
-}
-
-/// A playback opened this story's file itself. If the story is a partial
-/// waiting for its download (see [`begin_offline`]), the handle is shared
-/// from now on. Returns whether it was.
+/// A playback opened this story's file itself; share the handle if the story
+/// is a partial waiting for its download. Returns whether it was.
 pub fn adopt_reader(directory: u32, file: u32, handle: RawFile) -> bool {
     with(|s| {
-        let Some(stream) = s.as_mut() else {
-            return false;
-        };
-        if (stream.directory, stream.file) != (directory, file) || stream.writer_open {
-            return false;
-        }
-        stream.handle = Some(handle);
-        stream.reader_open = true;
-        true
+        s.as_mut()
+            .is_some_and(|s| s.adopt_reader(directory, file, handle))
     })
 }
 
 /// Whether a partial is playing with no download running for it.
 pub fn is_reading_offline() -> bool {
-    with(|s| s.is_some_and(|s| s.reader_open && !s.writer_open))
+    with(|s| s.is_some_and(|s| s.is_reading_offline()))
 }
 
-/// How much of this story is on the card, while a download or playback
-/// holds its file open and the card cannot be asked.
+/// Whether the server already confirmed this file is its version this session.
+pub fn version_verified(directory: u32, file: u32) -> bool {
+    with(|s| s.is_some_and(|s| s.version_verified(directory, file)))
+}
+
+/// How much of this story is on the card while its file is held open.
 pub fn written_for(directory: u32, file: u32) -> Option<u32> {
-    with(|s| {
-        s.filter(|s| (s.directory, s.file) == (directory, file))
-            .map(|s| s.written)
-    })
+    with(|s| s.as_ref()?.written_for(directory, file))
 }
 
 /// The handle a playback of this story still reads through, for a download
-/// restarting under it: the card cannot open the file a second time.
+/// restarting under it.
 pub fn handle_for_resume(directory: u32, file: u32) -> Option<RawFile> {
-    with(|s| {
-        s.filter(|s| (s.directory, s.file) == (directory, file) && s.reader_open && !s.writer_open)
-            .and_then(|s| s.handle)
-    })
+    with(|s| s.as_ref()?.handle_for_resume(directory, file))
 }
 
-/// The writer stopped short under a playback. Returns how long to wait
-/// before restarting it, or `None` once the retries are used up.
+/// The writer stopped short under a playback, or could not start. How long
+/// to wait before trying again, or `None` when there is nothing to retry for.
 pub fn schedule_retry(now_ms: u64) -> Option<u64> {
-    with(|s| {
-        let s = s.as_mut()?;
-        s.retrying = false;
-        if !s.reader_open || s.given_up {
-            return None;
-        }
-        let delay = 1_000u64 << s.retries.min(MAX_BACKOFF_SHIFT);
-        s.retries += 1;
-        s.retry_due_ms = Some(now_ms.saturating_add(delay));
-        Some(delay)
-    })
+    with(|s| s.as_mut()?.schedule_retry(now_ms))
 }
 
 /// Whether a scheduled restart is due now. Answers yes once.
 pub fn take_due_retry(now_ms: u64) -> bool {
-    with(|s| {
-        let Some(s) = s else { return false };
-        match s.retry_due_ms {
-            Some(due) if now_ms >= due => {
-                s.retry_due_ms = None;
-                s.retrying = true;
-                true
-            }
-            _ => false,
-        }
-    })
+    with(|s| s.as_mut().is_some_and(|s| s.take_due_retry(now_ms)))
 }
 
-/// No more restarts: the decoder may run dry at the end of what landed.
+/// No more restarts: the decoder stops at the end of what landed.
 pub fn stop_retrying() {
     with(|s| {
         if let Some(s) = s {
-            s.retry_due_ms = None;
-            s.retrying = false;
-            s.given_up = true;
+            s.stop_retrying();
         }
     });
 }
@@ -236,101 +91,71 @@ pub fn stop_retrying() {
 pub fn advance(written_this_body: u32) {
     with(|s| {
         if let Some(s) = s {
-            s.written = s.at.saturating_add(written_this_body);
-            if written_this_body > 0 {
-                // Bytes are arriving again: a later stop starts the count over.
-                s.retries = 0;
-            }
+            s.advance(written_this_body);
         }
     });
 }
 
-/// Whether enough of the story is on the card to start playing it.
-///
-/// Said once per download, so the caller reports it once.
+/// Whether enough of the story is on the card to start playing it. Said once.
 pub fn ready_to_start() -> bool {
-    with(|s| {
-        let Some(s) = s else { return false };
-        if s.announced || !s.writer_open {
-            return false;
-        }
-        let head =
-            s.at.saturating_add(HEAD_START.0.saturating_mul(PAGE_SIZE as u32));
-        let enough = s.written >= head || s.total.is_some_and(|total| s.written >= total);
-        if enough {
-            s.announced = true;
-        }
-        enough
-    })
+    with(|s| s.as_mut().is_some_and(|s| s.ready_to_start()))
 }
 
 /// Whether a download is writing any story right now.
 pub fn is_writing() -> bool {
-    with(|s| s.is_some_and(|s| s.writer_open))
+    with(|s| s.is_some_and(|s| s.is_writing()))
 }
 
 /// Whether a download is writing this story right now.
 pub fn is_writing_path(directory: u32, file: u32) -> bool {
-    with(|s| s.is_some_and(|s| s.writer_open && (s.directory, s.file) == (directory, file)))
+    with(|s| s.is_some_and(|s| s.is_writing_path(directory, file)))
 }
 
-/// A figure placed again while its story still downloads: say "enough to
-/// start" once more, so the new placement joins the download.
+/// A figure placed again while its story still downloads: announce the
+/// start once more, so the new placement joins the download.
 pub fn rearm() {
     with(|s| {
         if let Some(s) = s {
-            s.announced = false;
+            s.rearm();
         }
     });
 }
 
 /// The writer is finished. Returns whether the caller should close the
-/// handle: it should not while a playback still reads from it, and that
-/// playback then closes it.
+/// handle now; otherwise the playback still reading through it closes it.
 pub fn writer_done(whole: bool) -> bool {
-    with(|s| {
-        let Some(stream) = s else { return true };
-        stream.writer_open = false;
-        stream.complete = whole;
-        stream.failed = !whole;
-        if stream.reader_open {
-            false
-        } else {
-            *s = None;
-            true
-        }
+    with(|s| match s {
+        None => true,
+        Some(stream) => match stream.writer_done(whole) {
+            Handle::Close => {
+                *s = None;
+                true
+            }
+            Handle::Keep => false,
+        },
     })
 }
 
 /// A playback of this story borrows the writer's handle, with the file's
 /// whole length. `None` when no download has this story open.
 pub fn reader_begin(directory: u32, file: u32) -> Option<(RawFile, u32)> {
-    with(|s| {
-        let stream = s.as_mut()?;
-        if (stream.directory, stream.file) != (directory, file) || !stream.writer_open {
-            return None;
-        }
-        let handle = stream.handle?;
-        stream.reader_open = true;
-        Some((handle, stream.total.unwrap_or(stream.written)))
-    })
+    with(|s| s.as_mut()?.reader_begin(directory, file))
 }
 
-/// The playback is finished with the borrowed handle. Returns whether the
-/// caller should close it: yes once the writer is gone too.
+/// The playback is finished with the handle. Returns whether the caller
+/// should close it: yes once the writer is gone too.
 pub fn reader_done(directory: u32, file: u32) -> bool {
-    with(|s| {
-        let Some(stream) = s else { return true };
-        if (stream.directory, stream.file) != (directory, file) {
-            return true;
-        }
-        stream.reader_open = false;
-        if stream.writer_open {
-            false
-        } else {
-            *s = None;
-            true
-        }
+    with(|s| match s {
+        None => true,
+        Some(stream) => match stream.reader_done(directory, file) {
+            Handle::Close => {
+                if stream.is_over() {
+                    *s = None;
+                }
+                true
+            }
+            Handle::Keep => false,
+        },
     })
 }
 
@@ -339,46 +164,13 @@ pub fn reader_done(directory: u32, file: u32) -> bool {
 /// from the download, so the net task fetches at full speed.
 pub fn lead() -> Option<Pages> {
     let page = crate::audio::PAGE.load(core::sync::atomic::Ordering::Relaxed);
-    with(|s| {
-        let stream = s.as_ref()?;
-        if !stream.reader_open {
-            return None;
-        }
-        Some(Pages(
-            (stream.written / PAGE_SIZE as u32).saturating_sub(page),
-        ))
-    })
+    with(|s| s.as_ref()?.lead(page))
 }
 
 /// Whether the decoder may read on from `page`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Gate {
-    /// The pages it needs are on the card.
-    Go,
-    /// Not yet; the writer is still going.
-    Wait,
-    /// The download is not delivering and the decoder has caught up with
-    /// it: the story stops here.
-    Lost,
-}
-
 pub fn gate(directory: u32, file: u32, page: u32) -> Gate {
     with(|s| {
-        let Some(stream) = s else { return Gate::Go };
-        if (stream.directory, stream.file) != (directory, file) {
-            return Gate::Go;
-        }
-        let watermark = Pages(stream.written / PAGE_SIZE as u32);
-        if may_decode(Pages(page), watermark, MARGIN, stream.complete) {
-            Gate::Go
-        } else if stream.writer_open {
-            // Still writing; the bytes are on their way.
-            Gate::Wait
-        } else {
-            // Nothing is writing: the decoder has caught a download that is
-            // down, whether or not a restart is scheduled. A stock box stops
-            // here too, and the next placement resumes the partial.
-            Gate::Lost
-        }
+        s.as_ref()
+            .map_or(Gate::Go, |s| s.gate(directory, file, page))
     })
 }
