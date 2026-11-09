@@ -402,7 +402,18 @@ class Service:
         seq = req.get("seq")
         if seq is None or seq == self.applied_seq:
             return
-        wanted = {ruid(uid): (uid, url) for uid, url in (req.get("cards") or {}).items() if url}
+        # Each entry is checked on its own; a bad one is skipped and logged,
+        # the rest still apply, and the sequence is consumed either way.
+        wanted = {}
+        for uid, url in (req.get("cards") or {}).items():
+            if not url:
+                continue
+            try:
+                if not UID_FORMAT.match(str(uid)):
+                    raise ValueError("a UID is eight hex bytes with colons")
+                wanted[ruid(uid)] = (uid, check_url(str(url)))
+            except ValueError as e:
+                log.warning("the page's request names %r with %r — ignored: %s", uid, url, e)
         changed = False
         for rid, (uid, url) in wanted.items():
             if cfg["cards"].get(rid) != url:
