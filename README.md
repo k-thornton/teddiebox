@@ -30,20 +30,22 @@ All options are listed under [Configuration](#configuration).
 By default the box resumes like a stock box: only the figure played last
 resumes, also across power-off, and playing a different figure in between
 starts it over. Placing another figure briefly is how a story is restarted.
-That one position is stored in `LASTPLAY.TXT` in the SD card's root, written at
-shutdown.
+That one position is stored in `LASTPLAY.TXT` in the SD card's root, written
+each time the figure is lifted and at shutdown.
 
 Set `resume = every` in `config.txt` to remember the position of every story
 instead, also across power-off.
 
-- The position is written to the SD card when the figure's memory is needed for
-  another figure, and at shutdown.
+- The position is written to the SD card when the figure is lifted, when its
+  memory is needed for another figure, and at shutdown.
 - A story played to its end starts from the beginning next time.
 - The position is stored in `<story>.pos` next to the story on the SD card.
   Delete it to start that story from the beginning.
 
-In both modes, a flat battery or a reset loses the position since the last
-write. Writing more often would wear the SD card.
+In both modes the card holds the position as of the last lift, so a flat
+battery, a reset or a reflash loses only what played after that. This is
+better than stock, which keeps the position in RAM and restores it only after
+switching itself off; a stock box that loses power starts every story over.
 
 ### Chapter skip
 
@@ -136,6 +138,7 @@ Options:
 | `server` | required | `host:port` of your teddyCloud, up to 64 characters. Only letters, digits, `.`, `-`, `_` and `:` |
 | `ears_skip` | `yes` | holding an ear skips a chapter. `yes`/`no`, `true`/`false` or `1`/`0`. `no` gives stock ear behaviour, see [Chapter skip](#chapter-skip) |
 | `resume` | `last` | which stories resume where they stopped. `last`: only the figure played last, as on a stock box. `every`: every story. See [Position per story](#position-per-story) |
+| `idle_timeout` | `10` | minutes with no figure, press, download or charger before the box switches itself off, 1 to 1440. `10` is what a stock box does |
 | `update_url` | none | `https://` URL of an update manifest, up to 128 characters. Without it the box never checks for updates, see [Updates over the air](#updates-over-the-air). An empty value is an error |
 | `setup_password` | `teddiebox` | passphrase of the setup network, 8 to 63 characters, see [Setup mode](#changing-settings-without-an-sd-card-reader) |
 
