@@ -198,13 +198,16 @@ def build_taf(audio_dir, out_path, bitrate):
 
 # The name of TeddyCloud's web session cookie.
 SESSION_COOKIE = "tc_web_session"
+# Sessions already opened, by server and user, so every new client reuses
+# one instead of logging in again (a session lives a week on the server).
+_SESSIONS = {}
 
 
 class TeddyCloud:
     def __init__(self, base, ca_file=None, user=None, password=None):
         self.base = base.rstrip("/")
         self.user, self.password = user, password
-        self.token = None
+        self.token = _SESSIONS.get((self.base, user))
         # TeddyCloud's cert is CN "TeddyCloud Server" with no SANs (the box
         # insists on that), so the hostname can't match. Pin its CA instead.
         ctx = ssl.create_default_context(cafile=ca_file)
@@ -241,6 +244,7 @@ class TeddyCloud:
         self.token = answer.get("token")
         if not self.token:
             raise RuntimeError("TeddyCloud login gave no token")
+        _SESSIONS[(self.base, self.user)] = self.token
         log.info("logged in to TeddyCloud as %s", self.user)
 
     def get_json(self, path):
