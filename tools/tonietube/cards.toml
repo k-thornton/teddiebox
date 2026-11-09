@@ -1,0 +1,12 @@
+# tonietube: which YouTube playlist (or single video) plays on which card.
+# Keys are tag UIDs as the box or Flipper shows them; values are URLs.
+# The file is re-read every pass, so edits take effect without a restart.
+
+teddycloud = "https://192.168.50.188:8443"
+ca_file = "teddycloud-ca.pem"  # TeddyCloud's CA, so the connection is verified
+interval_minutes = 30
+library_dir = "tonietube"   # folder inside TeddyCloud's library
+bitrate = 96                # kbps Opus in the TAF (stock tonies use 96)
+
+[cards]
+"E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"

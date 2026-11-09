@@ -1,0 +1,17 @@
+FROM python:3.13-slim
+
+# ffmpeg + opusenc for TonieToolbox, deno so yt-dlp can solve YouTube's JS challenges.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg opus-tools curl unzip ca-certificates \
+ && curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+ && apt-get purge -y curl unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY tonietube.py /app/
+
+VOLUME /data
+ENV TONIETUBE_CONFIG=/data/cards.toml
+WORKDIR /data
+# yt-dlp breaks whenever YouTube changes; pick up the fix on every start.
+CMD ["sh", "-c", "pip install --no-cache-dir -q --root-user-action=ignore -U 'yt-dlp[default]' || true; exec python /app/tonietube.py"]
