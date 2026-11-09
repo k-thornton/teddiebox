@@ -336,7 +336,7 @@ class TeddyCloud:
 # --- sync -----------------------------------------------------------------
 
 
-def sync_card(cfg, state, tc, rid, url, force):
+def sync_card(cfg, state, tc, rid, url, force, on_render=None):
     title, ids = list_videos(url)
     fingerprint = hashlib.sha1("\n".join(ids).encode()).hexdigest()[:16]
     prev = state.get(rid)
@@ -344,6 +344,8 @@ def sync_card(cfg, state, tc, rid, url, force):
         log.debug("%s: %s unchanged (%d videos)", rid, title, len(ids))
         return
     log.info("%s: rendering %r (%d videos)", rid, title, len(ids))
+    if on_render:
+        on_render(rid)
 
     taf_name = f"{rid}.taf"
     lib_path = f"lib://{cfg['library_dir']}/{taf_name}"
@@ -375,13 +377,13 @@ def sync_card(cfg, state, tc, rid, url, force):
     log.info("%s: %r ready, %d chapters, %.1f MB", rid, title, len(files), size / 1e6)
 
 
-def sync_all(cfg, state, tc, force=False, only=None):
+def sync_all(cfg, state, tc, force=False, only=None, on_render=None):
     for rid, card in cfg["cards"].items():
         url = card["url"]
         if only and rid not in only:
             continue
         try:
-            sync_card(cfg, state, tc, rid, url, force or (only is not None))
+            sync_card(cfg, state, tc, rid, url, force or (only is not None), on_render)
             if "error" in state.get(rid):
                 state.set(rid, {k: v for k, v in state.get(rid).items() if k != "error"})
         except Exception as e:
@@ -420,9 +422,14 @@ class Service:
         with self.lock:
             only = None if (force_all or not self.force) else set(self.force)
             self.force.clear()
+        def rendering(rid):  # tell the page before the long part starts
+            self.busy = rid
+            self.publish(cfg, tc)
+
         if only:
-            sync_all(cfg, state, tc, only=only)
-        sync_all(cfg, state, tc, force=force_all)
+            sync_all(cfg, state, tc, only=only, on_render=rendering)
+        sync_all(cfg, state, tc, force=force_all, on_render=rendering)
+        self.busy = None
         self.publish(cfg, tc)
         return cfg
 
