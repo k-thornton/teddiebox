@@ -640,8 +640,11 @@ fn open_source(card: &Mounted, source: &Source) -> Result<(RawFile, u32, bool), 
             if let Some((handle, total)) = crate::stream::reader_begin(directory, file) {
                 return Ok((handle, total, true));
             }
-            card.open_content(directory, file)
-                .map(|(handle, size)| (handle, size, false))
+            card.open_content(directory, file).map(|(handle, size)| {
+                // A partial waiting for its download: gated at what has landed.
+                let adopted = crate::stream::adopt_reader(directory, file, handle);
+                (handle, size, adopted)
+            })
         }
         Source::First => match card.find_by_extension(b"TAF") {
             Some((name, size)) => {

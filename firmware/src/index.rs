@@ -107,6 +107,19 @@ impl<'a> CardIndex<'a> {
             .write_position(stock, path.directory, path.file, &out[..len])
     }
 
+    /// How much of a partly downloaded story the card holds and how long the
+    /// whole is meant to be, when the card holds its start but not all of it.
+    pub fn partial_extent(&self, tag: TagUid) -> Option<(u32, u32)> {
+        let path = content_path(tag.0);
+        let cached = self.cached(path.directory, path.file);
+        let on_card = cached.length_on_card?;
+        let total = cached.sidecar.as_ref()?.length;
+        // Less than the streaming head start is not worth starting on;
+        // all of it is not a partial.
+        let head = crate::stream::HEAD_START.0 * teddiebox_taf::PAGE_SIZE as u32;
+        (on_card >= head && on_card < total).then_some((on_card, total))
+    }
+
     fn cached(&self, directory: u32, file: u32) -> Cached {
         let key = (directory, file);
         if let Some((seen, cached)) = &*self.cached.borrow() {
@@ -186,6 +199,10 @@ impl ContentIndex for CardIndex<'_> {
     fn is_stale(&self, tag: TagUid) -> bool {
         let path = content_path(tag.0);
         crate::marked_stale(path.directory, path.file)
+    }
+
+    fn has_playable_prefix(&self, tag: TagUid) -> bool {
+        self.partial_extent(tag).is_some()
     }
 
     /// Where this story should resume: the position held in RAM if there is

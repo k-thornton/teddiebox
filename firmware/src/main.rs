@@ -1267,6 +1267,18 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                 }
             }
             let path = teddiebox_download::content_path(tag.0);
+            // A partial the network could not be fetched for: play it gated
+            // at its end, and try the network again shortly.
+            if !stream::is_writing_path(path.directory, path.file) {
+                if let Some((on_card, total)) = index.partial_extent(tag) {
+                    stream::begin_offline(path.directory, path.file, on_card, Some(total));
+                    if let Some(delay) = stream::schedule_retry(Instant::now().as_millis()) {
+                        esp_println::println!(
+                            "teddiebox: plate playing the {on_card} bytes here; trying the network again in {delay} ms"
+                        );
+                    }
+                }
+            }
             // Both kinds are under `CONTENT/`. The request says which, since a
             // download's position is saved apart from stock content.
             let request = if index.on_stock_card(path.directory, path.file) {
@@ -1532,6 +1544,13 @@ fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Optio
 /// figure.
 fn gather_fetch_outcome(placed: &Placed) -> Option<Event> {
     let (outcome, outcome_ruid) = transfer(Transfer::take_outcome)?;
+    // A partial playing with its download still to come: a fetch that could
+    // not start is tried again, like one that stopped short.
+    if matches!(outcome, Outcome::Unreachable | Outcome::Refused) && stream::is_reading_offline() {
+        if let Some(delay) = stream::schedule_retry(Instant::now().as_millis()) {
+            esp_println::println!("teddiebox: get trying the network again in {delay} ms");
+        }
+    }
     match teddiebox_core::plate::settle_fetch_outcome(placed.answering(outcome_ruid), outcome) {
         // The figure it was for is still on the box. (The reducer checks
         // the identity again before acting.)

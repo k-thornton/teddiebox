@@ -48,6 +48,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// How long to wait before asking the throttle again.
 const THROTTLE_WAIT: Duration = Duration::from_millis(50);
+/// While the throttle holds a download back, one read this often keeps the
+/// connection alive: a server drops a connection that has been silent for
+/// minutes, and a story far ahead of its decoder pauses for that long.
+const KEEPALIVE_READ: Duration = Duration::from_secs(20);
 
 /// Socket buffers for the TLS transport.
 ///
@@ -776,6 +780,7 @@ pub async fn fetch(
     // Print progress every megabyte, so a long download does not look like a
     // hang.
     let mut announced = 0u32;
+    let mut last_read = Instant::now();
     while !body.is_complete() {
         // Asked before reading, so Wi-Fi stays quiet while audio needs the
         // CPU. It also stops a download that is no longer needed, even while
@@ -784,10 +789,12 @@ pub async fn fetch(
             match may_fetch() {
                 Continue::Now => break,
                 Continue::Abandon => return Err(Error::Abandoned),
+                Continue::Wait if last_read.elapsed() >= KEEPALIVE_READ => break,
                 Continue::Wait => Timer::after(THROTTLE_WAIT).await,
             }
         }
         let got = body.read(&mut wire, &mut buf).await;
+        last_read = Instant::now();
         let n = got.map_err(|e| wire.explain(e))?;
         crc.update(&buf[..n]);
         received += n as u32;

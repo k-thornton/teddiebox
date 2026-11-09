@@ -361,7 +361,7 @@ impl Core {
                 extend(actions, self.playback.on_revalidated(tag, freshness));
             }
             Event::ContentMissing(tag, why) => {
-                extend(actions, self.playback.on_content_missing(tag, why));
+                extend(actions, self.playback.on_content_missing(tag, why, index));
             }
 
             Event::Battery {

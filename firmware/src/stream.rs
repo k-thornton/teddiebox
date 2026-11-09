@@ -31,7 +31,8 @@ const MARGIN: Pages = Pages(2);
 struct Stream {
     directory: u32,
     file: u32,
-    handle: RawFile,
+    /// The shared handle, once either side has opened the file.
+    handle: Option<RawFile>,
     /// Where this body starts in the file. Bytes before it were already there.
     at: u32,
     /// Bytes on the card so far, counted from the start of the file.
@@ -50,6 +51,8 @@ struct Stream {
     retries: u32,
     /// When the next restart is due, in the box's millisecond clock.
     retry_due_ms: Option<u64>,
+    /// A restart has been asked for and its writer has not opened yet.
+    retrying: bool,
 }
 
 /// How many times a download that stops short under a playing story is
@@ -70,9 +73,9 @@ pub fn begin(directory: u32, file: u32, handle: RawFile, at: u32, total: Option<
         // retry count; everything about the writer starts afresh.
         let (handle, reader_open, retries, announced) = match *s {
             Some(held) if (held.directory, held.file) == (directory, file) && held.reader_open => {
-                (held.handle, true, held.retries, true)
+                (held.handle.or(Some(handle)), true, held.retries, true)
             }
-            _ => (handle, false, 0, false),
+            _ => (Some(handle), false, 0, false),
         };
         *s = Some(Stream {
             directory,
@@ -88,8 +91,56 @@ pub fn begin(directory: u32, file: u32, handle: RawFile, at: u32, total: Option<
             announced,
             retries,
             retry_due_ms: None,
+            retrying: false,
         })
     });
+}
+
+/// The network could not be reached for a story the card holds part of:
+/// the partial plays, gated at its end, and the download is tried again
+/// shortly (`schedule_retry`). The playback opens the file itself and
+/// hands the handle over with [`adopt_reader`].
+pub fn begin_offline(directory: u32, file: u32, written: u32, total: Option<u32>) {
+    with(|s| {
+        *s = Some(Stream {
+            directory,
+            file,
+            handle: None,
+            at: written,
+            written,
+            total,
+            writer_open: false,
+            reader_open: false,
+            complete: false,
+            failed: true,
+            announced: true,
+            retries: 0,
+            retry_due_ms: None,
+            retrying: false,
+        })
+    });
+}
+
+/// A playback opened this story's file itself. If the story is a partial
+/// waiting for its download (see [`begin_offline`]), the handle is shared
+/// from now on. Returns whether it was.
+pub fn adopt_reader(directory: u32, file: u32, handle: RawFile) -> bool {
+    with(|s| {
+        let Some(stream) = s.as_mut() else {
+            return false;
+        };
+        if (stream.directory, stream.file) != (directory, file) || stream.writer_open {
+            return false;
+        }
+        stream.handle = Some(handle);
+        stream.reader_open = true;
+        true
+    })
+}
+
+/// Whether a partial is playing with no download running for it.
+pub fn is_reading_offline() -> bool {
+    with(|s| s.is_some_and(|s| s.reader_open && !s.writer_open))
 }
 
 /// How much of this story is on the card, while a download or playback
@@ -106,7 +157,7 @@ pub fn written_for(directory: u32, file: u32) -> Option<u32> {
 pub fn handle_for_resume(directory: u32, file: u32) -> Option<RawFile> {
     with(|s| {
         s.filter(|s| (s.directory, s.file) == (directory, file) && s.reader_open && !s.writer_open)
-            .map(|s| s.handle)
+            .and_then(|s| s.handle)
     })
 }
 
@@ -121,6 +172,7 @@ pub fn schedule_retry(now_ms: u64) -> Option<u64> {
         let delay = 1_000u64 << s.retries;
         s.retries += 1;
         s.retry_due_ms = Some(now_ms.saturating_add(delay));
+        s.retrying = false;
         Some(delay)
     })
 }
@@ -132,6 +184,7 @@ pub fn take_due_retry(now_ms: u64) -> bool {
         match s.retry_due_ms {
             Some(due) if now_ms >= due => {
                 s.retry_due_ms = None;
+                s.retrying = true;
                 true
             }
             _ => false,
@@ -144,6 +197,7 @@ pub fn stop_retrying() {
     with(|s| {
         if let Some(s) = s {
             s.retry_due_ms = None;
+            s.retrying = false;
             s.retries = RETRIES;
         }
     });
@@ -227,8 +281,9 @@ pub fn reader_begin(directory: u32, file: u32) -> Option<(RawFile, u32)> {
         if (stream.directory, stream.file) != (directory, file) || !stream.writer_open {
             return None;
         }
+        let handle = stream.handle?;
         stream.reader_open = true;
-        Some((stream.handle, stream.total.unwrap_or(stream.written)))
+        Some((handle, stream.total.unwrap_or(stream.written)))
     })
 }
 
@@ -286,8 +341,8 @@ pub fn gate(directory: u32, file: u32, page: u32) -> Gate {
         let watermark = Pages(stream.written / PAGE_SIZE as u32);
         if may_decode(Pages(page), watermark, MARGIN, stream.complete) {
             Gate::Go
-        } else if stream.writer_open || stream.retry_due_ms.is_some() {
-            // Still writing, or about to start again.
+        } else if stream.writer_open || stream.retry_due_ms.is_some() || stream.retrying {
+            // Still writing, about to start again, or starting again now.
             Gate::Wait
         } else {
             Gate::Lost

@@ -26,9 +26,10 @@ pub enum Cue {
     VolumeDown,
     /// Two short beeps: the volume is already at its top or bottom.
     VolumeLimit,
-    /// G5, B5 then D6, rising: the story's download finished while it
-    /// played. A stock box chimes over the story at that moment too; these
-    /// notes are this firmware's own, not measured from one.
+    /// A short E5, a pause, then a C5 that rings about a second and dies
+    /// away: the story's download finished while it played. The stock box's
+    /// chime for the same moment, as its codec's beep generator plays it:
+    /// 40 ms at 659 Hz, 150 ms of silence, 1050 ms at 523 Hz fading out.
     Downloaded,
 }
 
@@ -47,12 +48,19 @@ enum Segment {
     Silence {
         frames: u32,
     },
+    /// A plain sine dying away over its whole length, to about −36 dB.
+    Decay {
+        hz: f32,
+        frames: u32,
+    },
 }
 
 impl Segment {
     const fn frames(self) -> u32 {
         match self {
-            Segment::Beep { frames, .. } | Segment::Note { frames, .. } => frames,
+            Segment::Beep { frames, .. }
+            | Segment::Note { frames, .. }
+            | Segment::Decay { frames, .. } => frames,
             Segment::Silence { frames } => frames,
         }
     }
@@ -109,20 +117,22 @@ static VOLUME_LIMIT: [Segment; 3] = [
     },
 ];
 
-static DOWNLOADED: [Segment; 5] = [
-    Segment::Note {
-        hz: 783.99,
-        frames: SKIP_SECOND,
+/// 40 ms, 150 ms and 1050 ms: the download chime's blip, gap and ring.
+const CHIME_BLIP: u32 = 1_920;
+const CHIME_GAP: u32 = 7_200;
+const CHIME_RING: u32 = 50_400;
+/// Per-frame factor taking the ring to −36 dB (1/64) over `CHIME_RING`
+/// frames: 2^(−6/50400).
+const DECAY_PER_FRAME: f32 = 0.999_917_5;
+static DOWNLOADED: [Segment; 3] = [
+    Segment::Beep {
+        hz: 659.26,
+        frames: CHIME_BLIP,
     },
-    Segment::Silence { frames: SKIP_GAP },
-    Segment::Note {
-        hz: 987.77,
-        frames: SKIP_SECOND,
-    },
-    Segment::Silence { frames: SKIP_GAP },
-    Segment::Note {
-        hz: 1_174.66,
-        frames: SKIP_SECOND,
+    Segment::Silence { frames: CHIME_GAP },
+    Segment::Decay {
+        hz: 523.25,
+        frames: CHIME_RING,
     },
 ];
 /// The skip notes' 2nd and 3rd harmonics: −26 dB and −42 dB.
@@ -244,7 +254,7 @@ impl CueSamples {
         self.frame = 0;
         self.fade = 1.0;
         self.tones = match segment {
-            Segment::Beep { hz, .. } | Segment::Note { hz, .. } => {
+            Segment::Beep { hz, .. } | Segment::Note { hz, .. } | Segment::Decay { hz, .. } => {
                 let step = 2.0 * core::f32::consts::PI * hz / SAMPLE_RATE_HZ as f32;
                 [
                     Resonator::new(step),
@@ -268,6 +278,11 @@ impl CueSamples {
         let level = match segment {
             Segment::Silence { .. } => 0.0,
             Segment::Beep { frames, .. } => self.tones[0].next() * edge(n, frames),
+            Segment::Decay { frames, .. } => {
+                let level = self.tones[0].next() * self.fade * edge(n, frames);
+                self.fade *= DECAY_PER_FRAME;
+                level
+            }
             Segment::Note { frames, .. } => {
                 let wave = self.tones[0].next()
                     + SECOND_HARMONIC * self.tones[1].next()
@@ -426,7 +441,7 @@ mod tests {
                 (Cue::VolumeUp, 960),
                 (Cue::VolumeDown, 960),
                 (Cue::VolumeLimit, 3_360),
-                (Cue::Downloaded, 18_104),
+                (Cue::Downloaded, 59_520),
             ]
         );
     }
@@ -764,6 +779,33 @@ mod tests {
     }
 
     /// 0 means no cue.
+    /// The chime's ring starts loud and ends near silence.
+    #[test]
+    fn the_download_chime_rings_and_dies_away() {
+        // Given
+        let left = render(Cue::Downloaded);
+        let ring_start = (CHIME_BLIP + CHIME_GAP) as usize;
+
+        // When: the loudest sample in the first and the last 100 ms of the ring
+        let early = left[ring_start + 100..ring_start + 4_900]
+            .iter()
+            .map(|s| s.unsigned_abs())
+            .max()
+            .unwrap();
+        let late = left[left.len() - 4_900..left.len() - 100]
+            .iter()
+            .map(|s| s.unsigned_abs())
+            .max()
+            .unwrap();
+
+        // Then
+        assert!(
+            early > u16::try_from(CUE_PEAK).unwrap() / 2,
+            "early peak {early}"
+        );
+        assert!(late < early / 20, "late peak {late} against early {early}");
+    }
+
     #[test]
     fn a_byte_that_names_no_cue_is_refused() {
         // Given

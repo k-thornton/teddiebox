@@ -20,6 +20,12 @@ pub trait ContentIndex {
     /// story for this figure. The next placement downloads it instead of
     /// playing the old copy.
     fn is_stale(&self, tag: TagUid) -> bool;
+    /// Whether the card holds the start of this story, enough to play while
+    /// the rest is fetched, without holding all of it. Only such a story is
+    /// played when the network cannot be reached.
+    fn has_playable_prefix(&self, _tag: TagUid) -> bool {
+        false
+    }
 }
 
 /// What the server said about a story already on the card.
@@ -201,9 +207,24 @@ impl Playback {
         }
     }
 
-    pub fn on_content_missing(&mut self, tag: TagUid, why: Unavailable) -> Actions {
+    pub fn on_content_missing<I: ContentIndex>(
+        &mut self,
+        tag: TagUid,
+        why: Unavailable,
+        index: &I,
+    ) -> Actions {
         let mut actions = Actions::new();
         if self.state != State::Fetching(tag) {
+            return actions;
+        }
+        // The network is not there, but the card has the start of the
+        // story: play that, as if it were still downloading. The firmware
+        // keeps trying the network meanwhile.
+        if why != Unavailable::NoContent && index.has_playable_prefix(tag) {
+            let from = index.saved_position(tag);
+            self.position = from;
+            self.state = State::Playing(tag);
+            let _ = actions.push(Action::Play { tag, from });
             return actions;
         }
         self.state = State::Failed;
@@ -590,7 +611,7 @@ mod tests {
         p.on_tag_present(TAG, &unknown());
 
         // When
-        let actions = p.on_content_missing(TAG, Unavailable::NoContent);
+        let actions = p.on_content_missing(TAG, Unavailable::NoContent, &unknown());
 
         // Then
         assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoContent)]);
@@ -605,7 +626,7 @@ mod tests {
         p.on_tag_present(TAG, &unknown());
 
         // When
-        let actions = p.on_content_missing(TAG, Unavailable::Unreachable);
+        let actions = p.on_content_missing(TAG, Unavailable::Unreachable, &unknown());
 
         // Then
         assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::NoNetwork)]);
@@ -621,7 +642,7 @@ mod tests {
         p.on_tag_present(TAG, &unknown());
 
         // When
-        let actions = p.on_content_missing(TAG, Unavailable::Refused);
+        let actions = p.on_content_missing(TAG, Unavailable::Refused, &unknown());
 
         // Then
         assert_eq!(
@@ -638,10 +659,51 @@ mod tests {
         p.on_tag_present(TAG, &unknown());
 
         // When
-        let actions = p.on_content_missing(OTHER, Unavailable::NoContent);
+        let actions = p.on_content_missing(OTHER, Unavailable::NoContent, &unknown());
 
         // Then
         assert!(actions.is_empty());
+    }
+
+    /// The network cannot be reached, but the card holds the first minutes
+    /// of the story: they play, and no prompt sounds.
+    #[test]
+    fn an_unreachable_server_plays_the_partial_the_card_holds() {
+        // Given
+        struct Partial;
+        impl ContentIndex for Partial {
+            fn is_available(&self, _tag: TagUid) -> bool {
+                false
+            }
+            fn saved_position(&self, _tag: TagUid) -> Position {
+                Position::Exact { page: 40 }
+            }
+            fn wants_revalidation(&self, _tag: TagUid) -> bool {
+                false
+            }
+            fn is_stale(&self, _tag: TagUid) -> bool {
+                false
+            }
+            fn has_playable_prefix(&self, _tag: TagUid) -> bool {
+                true
+            }
+        }
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &Partial);
+        assert_eq!(p.kind(), PlaybackKind::Fetching);
+
+        // When
+        let actions = p.on_content_missing(TAG, Unavailable::Unreachable, &Partial);
+
+        // Then
+        assert_eq!(
+            actions.as_slice(),
+            &[Action::Play {
+                tag: TAG,
+                from: Position::Exact { page: 40 }
+            }]
+        );
+        assert_eq!(p.kind(), PlaybackKind::Playing);
     }
 
     /// A story playing while it downloads: when the download finishes, a
