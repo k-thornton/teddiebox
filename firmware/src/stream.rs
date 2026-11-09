@@ -53,12 +53,16 @@ struct Stream {
     retry_due_ms: Option<u64>,
     /// A restart has been asked for and its writer has not opened yet.
     retrying: bool,
+    /// No more restarts: the story changed under the playback.
+    given_up: bool,
+    /// The server has confirmed this file is its version, by a download
+    /// that started from it this session. A retry need not ask again.
+    verified: bool,
 }
 
-/// How many times a download that stops short under a playing story is
-/// restarted before the story is allowed to run dry: 1, 2, 4 and 8 s apart,
-/// as a stock box does. Progress resets the count.
-const RETRIES: u32 = 4;
+/// The longest wait between restarts: 1, 2, 4, then 8 s and 8 s again, for
+/// as long as the story plays, as a stock box does. Progress resets it.
+const MAX_BACKOFF_SHIFT: u32 = 3;
 
 static STREAM: CsMutex<RefCell<Option<Stream>>> = CsMutex::new(RefCell::new(None));
 
@@ -92,6 +96,8 @@ pub fn begin(directory: u32, file: u32, handle: RawFile, at: u32, total: Option<
             retries,
             retry_due_ms: None,
             retrying: false,
+            given_up: false,
+            verified: true,
         })
     });
 }
@@ -117,8 +123,31 @@ pub fn begin_offline(directory: u32, file: u32, written: u32, total: Option<u32>
             retries: 0,
             retry_due_ms: None,
             retrying: false,
+            given_up: false,
+            verified: false,
         })
     });
+}
+
+/// A partial waiting for its download, which no one has opened yet: the
+/// playback about to open it must do so for writing too, and this is the
+/// file's whole length.
+pub fn awaiting_reader(directory: u32, file: u32) -> Option<u32> {
+    with(|s| {
+        s.filter(|s| {
+            (s.directory, s.file) == (directory, file)
+                && !s.writer_open
+                && !s.reader_open
+                && s.handle.is_none()
+        })
+        .map(|s| s.total.unwrap_or(s.written))
+    })
+}
+
+/// Whether the server has already confirmed this file is its version this
+/// session, so a download continuing it need not ask again.
+pub fn version_verified(directory: u32, file: u32) -> bool {
+    with(|s| s.is_some_and(|s| (s.directory, s.file) == (directory, file) && s.verified))
 }
 
 /// A playback opened this story's file itself. If the story is a partial
@@ -166,13 +195,13 @@ pub fn handle_for_resume(directory: u32, file: u32) -> Option<RawFile> {
 pub fn schedule_retry(now_ms: u64) -> Option<u64> {
     with(|s| {
         let s = s.as_mut()?;
-        if !s.reader_open || s.retries >= RETRIES {
+        s.retrying = false;
+        if !s.reader_open || s.given_up {
             return None;
         }
-        let delay = 1_000u64 << s.retries;
+        let delay = 1_000u64 << s.retries.min(MAX_BACKOFF_SHIFT);
         s.retries += 1;
         s.retry_due_ms = Some(now_ms.saturating_add(delay));
-        s.retrying = false;
         Some(delay)
     })
 }
@@ -198,7 +227,7 @@ pub fn stop_retrying() {
         if let Some(s) = s {
             s.retry_due_ms = None;
             s.retrying = false;
-            s.retries = RETRIES;
+            s.given_up = true;
         }
     });
 }
@@ -328,7 +357,8 @@ pub enum Gate {
     Go,
     /// Not yet; the writer is still going.
     Wait,
-    /// Never: the download ended before it got this far.
+    /// The download is not delivering and the decoder has caught up with
+    /// it: the story stops here.
     Lost,
 }
 
@@ -341,10 +371,13 @@ pub fn gate(directory: u32, file: u32, page: u32) -> Gate {
         let watermark = Pages(stream.written / PAGE_SIZE as u32);
         if may_decode(Pages(page), watermark, MARGIN, stream.complete) {
             Gate::Go
-        } else if stream.writer_open || stream.retry_due_ms.is_some() || stream.retrying {
-            // Still writing, about to start again, or starting again now.
+        } else if stream.writer_open {
+            // Still writing; the bytes are on their way.
             Gate::Wait
         } else {
+            // Nothing is writing: the decoder has caught a download that is
+            // down, whether or not a restart is scheduled. A stock box stops
+            // here too, and the next placement resumes the partial.
             Gate::Lost
         }
     })

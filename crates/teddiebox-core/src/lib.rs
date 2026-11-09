@@ -68,6 +68,9 @@ pub enum Event {
     TrackFinished,
     /// The story played to its end. Sent by the playback task.
     PlaybackEnded,
+    /// The story caught up with its own download, which is not delivering.
+    /// Sent by the playback task.
+    PlaybackRanDry,
     /// Content for this tag is now available locally.
     ContentReady(TagUid),
     /// What the server said about a cached story, in answer to
@@ -147,7 +150,8 @@ impl Default for CoreConfig {
         Self {
             volume_limit: MAX_VOLUME,
             battery: BatteryConfig::default(),
-            idle_timeout_ms: 5 * 60 * 1_000,
+            // Ten minutes, as on a stock box.
+            idle_timeout_ms: 10 * 60 * 1_000,
         }
     }
 }
@@ -313,6 +317,7 @@ impl Core {
             | Event::Revalidated(..)
             | Event::ContentMissing(..)
             | Event::PlaybackEnded
+            | Event::PlaybackRanDry
             | Event::Slap(_)
             // Somebody plugged or unplugged something, so this is activity.
             | Event::Headphones(_) => {
@@ -378,6 +383,7 @@ impl Core {
             }
 
             Event::PlaybackEnded => extend(actions, self.playback.on_playback_ended()),
+            Event::PlaybackRanDry => extend(actions, self.playback.on_playback_ran_dry()),
 
             Event::Slap(side) => {
                 let _ = actions.push(match side {
@@ -495,7 +501,7 @@ mod tests {
     const TAG: TagUid = TagUid([1, 2, 3, 4, 5, 6, 7, 8]);
 
     /// The idle timeout of `CoreConfig::default()`.
-    const IDLE_MS: Millis = 5 * 60 * 1_000;
+    const IDLE_MS: Millis = 10 * 60 * 1_000;
 
     struct Index;
     impl ContentIndex for Index {
@@ -1094,7 +1100,7 @@ mod tests {
 
         // When
         let a_second_after = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
-        let a_timeout_after = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
+        let a_timeout_after = c.handle(Event::Tick(70 * 60 * 1_000 + 1), &Index);
 
         // Then
         assert!(!contains(
@@ -1136,7 +1142,7 @@ mod tests {
 
         // When
         let a_second_later = c.handle(Event::Tick(60 * 60 * 1_000 + 1_000), &Index);
-        let a_timeout_later = c.handle(Event::Tick(65 * 60 * 1_000 + 1), &Index);
+        let a_timeout_later = c.handle(Event::Tick(70 * 60 * 1_000 + 1), &Index);
 
         // Then
         assert!(!contains(

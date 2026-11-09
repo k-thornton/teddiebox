@@ -360,6 +360,8 @@ pub enum Finish {
     Ended,
     /// `STOP` was set: a figure lifted, a console `stop`, or a new request.
     Stopped,
+    /// The story caught up with a download that is not delivering.
+    RanDry,
 }
 
 impl From<bool> for Finish {
@@ -640,11 +642,16 @@ fn open_source(card: &Mounted, source: &Source) -> Result<(RawFile, u32, bool), 
             if let Some((handle, total)) = crate::stream::reader_begin(directory, file) {
                 return Ok((handle, total, true));
             }
-            card.open_content(directory, file).map(|(handle, size)| {
-                // A partial waiting for its download: gated at what has landed.
-                let adopted = crate::stream::adopt_reader(directory, file, handle);
-                (handle, size, adopted)
-            })
+            // A partial waiting for its download: opened for writing too,
+            // since the download will continue through this very handle,
+            // and gated at what has landed.
+            if let Some(total) = crate::stream::awaiting_reader(directory, file) {
+                let handle = card.open_download_for_append(directory, file)?;
+                crate::stream::adopt_reader(directory, file, handle);
+                return Ok((handle, total, true));
+            }
+            card.open_content(directory, file)
+                .map(|(handle, size)| (handle, size, false))
         }
         Source::First => match card.find_by_extension(b"TAF") {
             Some((name, size)) => {
@@ -1093,6 +1100,8 @@ async fn play_taf_inner(
     let mut longest_gap_us: u64 = 0;
     let mut last_pass = Instant::now();
     let mut stopped = false;
+    // Set when a story downloading under it ran out of bytes.
+    let mut ran_dry = false;
     // How many times the DMA ran off the end of its descriptor chain and had
     // to be restarted. Each one is audible.
     let mut restarts: u32 = 0;
@@ -1161,10 +1170,11 @@ async fn play_taf_inner(
                 }
                 crate::stream::Gate::Lost => {
                     esp_println::println!(
-                        "teddiebox: taf the download ended before page {} — stopping here",
+                        "teddiebox: taf the download is not delivering at page {} — stopping here",
                         decoder.page()
                     );
                     stopped = true;
+                    ran_dry = true;
                     break;
                 }
             }
@@ -1238,5 +1248,10 @@ async fn play_taf_inner(
     log_taf_summary(
         started, frames, stopped, &cushion, restarts, pcm_crc, decode_us,
     );
-    Ok((Finish::from(stopped), i2s_tx, buffer))
+    let finish = if ran_dry {
+        Finish::RanDry
+    } else {
+        Finish::from(stopped)
+    };
+    Ok((finish, i2s_tx, buffer))
 }

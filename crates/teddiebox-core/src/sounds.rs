@@ -108,6 +108,8 @@ pub enum Sound {
     /// Identified by listening. It sits between `NoInternet` and
     /// `WrongPassword`, so the three are easy to mix up.
     NoStory,
+    /// The short sound a stock box plays when a story reaches its end.
+    StoryEnd,
 }
 
 impl Sound {
@@ -120,6 +122,8 @@ impl Sound {
             crate::Prompt::BatteryCritical => Self::BatteryCritical,
             crate::Prompt::NoContent => Self::NoStory,
             crate::Prompt::WrongPassword => Self::WrongPassword,
+            crate::Prompt::DownloadInterrupted => Self::NetworkError,
+            crate::Prompt::StoryEnd => Self::StoryEnd,
         }
     }
 
@@ -135,6 +139,7 @@ impl Sound {
             Self::NoInternet => 0x0000_0011,
             Self::WrongPassword => 0x0000_0013,
             Self::NoStory => 0x0000_0012,
+            Self::StoryEnd => 0x0000_0006,
         }
     }
 }

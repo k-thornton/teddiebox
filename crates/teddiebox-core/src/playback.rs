@@ -194,7 +194,26 @@ impl Playback {
         let mut actions = Actions::new();
         if let State::Playing(tag) = self.state {
             self.state = State::Idle;
+            // The short end-of-story sound, as a stock box plays it.
+            let _ = actions.push(Action::PlayPrompt(Prompt::StoryEnd));
             self.ask_if_unchecked(tag, &mut actions);
+        }
+        actions
+    }
+
+    /// A story playing from its own download caught up with the download,
+    /// which is not delivering. The story stops where it is, its place is
+    /// kept for the next placement, and the box says why, as a stock box
+    /// does with its "download interrupted" sound.
+    pub fn on_playback_ran_dry(&mut self) -> Actions {
+        let mut actions = Actions::new();
+        if let State::Playing(tag) = self.state {
+            let _ = actions.push(Action::SavePosition {
+                tag,
+                pos: self.position,
+            });
+            self.state = State::Failed;
+            let _ = actions.push(Action::PlayPrompt(Prompt::DownloadInterrupted));
         }
         actions
     }
@@ -352,7 +371,13 @@ mod tests {
         let actions = p.on_playback_ended();
 
         // Then
-        assert_eq!(actions.as_slice(), &[Action::Revalidate(TAG)]);
+        assert_eq!(
+            actions.as_slice(),
+            &[
+                Action::PlayPrompt(Prompt::StoryEnd),
+                Action::Revalidate(TAG)
+            ]
+        );
     }
 
     /// Asked once: a second lift does not ask again.
@@ -665,6 +690,32 @@ mod tests {
         assert!(actions.is_empty());
     }
 
+    /// A story that runs out of downloaded bytes stops with the interrupted
+    /// sound and keeps its place; the next placement resumes it.
+    #[test]
+    fn a_story_running_dry_stops_with_a_sound_and_keeps_its_place() {
+        // Given
+        let mut p = Playback::new();
+        p.on_tag_present(TAG, &known(0));
+        p.note_position(Position::Exact { page: 77 });
+
+        // When
+        let actions = p.on_playback_ran_dry();
+
+        // Then
+        assert_eq!(
+            actions.as_slice(),
+            &[
+                Action::SavePosition {
+                    tag: TAG,
+                    pos: Position::Exact { page: 77 }
+                },
+                Action::PlayPrompt(Prompt::DownloadInterrupted),
+            ]
+        );
+        assert_eq!(p.kind(), PlaybackKind::Failed);
+    }
+
     /// The network cannot be reached, but the card holds the first minutes
     /// of the story: they play, and no prompt sounds.
     #[test]
@@ -781,7 +832,8 @@ mod tests {
     }
 
     /// A story that reaches its end leaves the box idle, with the figure still
-    /// on the box, so the LED updates and the idle timeout can fire.
+    /// on the box, so the LED updates and the idle timeout can fire. The only
+    /// action is the end-of-story sound.
     #[test]
     fn a_story_reaching_its_end_leaves_the_box_idle() {
         // Given
@@ -792,7 +844,7 @@ mod tests {
         let actions = p.on_playback_ended();
 
         // Then
-        assert!(actions.is_empty());
+        assert_eq!(actions.as_slice(), &[Action::PlayPrompt(Prompt::StoryEnd)]);
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
 
@@ -809,7 +861,12 @@ mod tests {
         let actions = p.on_playback_ended();
 
         // Then
-        assert!(actions.is_empty());
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SavePosition { .. } | Action::Pause)),
+            "{actions:?}"
+        );
     }
 
     /// A story ending while the box was fetching something else, or idle already,

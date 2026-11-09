@@ -166,6 +166,11 @@ pub enum Prompt {
     /// Separate from [`Prompt::NoNetwork`] because the fix is different: this
     /// one means check the card, that one means check the router.
     WrongPassword,
+    /// A story playing from its own download caught up with it, and the
+    /// download is not delivering. The story stopped where it was.
+    DownloadInterrupted,
+    /// A story reached its end.
+    StoryEnd,
     BatteryLow,
     /// The battery is nearly gone and the box is about to stop.
     ///

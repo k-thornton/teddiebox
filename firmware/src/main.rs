@@ -1868,13 +1868,21 @@ async fn play_taf_story(
             let len = position::render(0, &mut out);
             let _ = card.write_position(stock, dir, file, &out[..len]);
             // Also drop the RAM copy, which would otherwise win over the
-            // card.
-            forget_place(((dir as u64) << 32) | file as u64);
+            // card, and the record a lift writes, or a power loss after
+            // the ending would resume mid-story.
+            let ruid = ((dir as u64) << 32) | file as u64;
+            forget_place(ruid);
+            persist_place(&CardIndex::new(card), TagUid::from_ruid(ruid), 0);
         }
         // The reducer cannot learn this any other way. Sent for every
         // story that ends, including console playback, so the reducer
         // returns to idle.
         apply(reducer, card, Event::PlaybackEnded, placed.token());
+    }
+    // The story caught up with a download that is not delivering: the
+    // reducer stops it with the interrupted sound and keeps its place.
+    if matches!(outcome, Ok(audio::Finish::RanDry)) {
+        apply(reducer, card, Event::PlaybackRanDry, placed.token());
     }
     // Cleared only by the announcement's own playback, but whatever the
     // outcome, or a failed announcement would block the shutdown for
@@ -2625,7 +2633,10 @@ async fn fetch_story(
     // A partial file is continued only if it is still the server's version:
     // teddyCloud sends no ETag, and a replaced story of the same length would
     // otherwise be joined onto the old one's start.
-    let from = if from > 0 {
+    // A download restarting under its own playback already had its file
+    // confirmed when it started; asking again would cost a second handshake.
+    let verified = stream::version_verified((requested >> 32) as u32, requested as u32);
+    let from = if from > 0 && !verified {
         let on_card = PARTIAL_AUDIO_ID.load(Ordering::Relaxed);
         match tls::freshness(tls, stack, server, requested, on_card, token).await {
             Ok(teddiebox_cloud::Fresh::Changed) => {
