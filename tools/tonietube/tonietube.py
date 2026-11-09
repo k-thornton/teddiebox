@@ -18,6 +18,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import ssl
@@ -53,9 +54,29 @@ def load_config(path):
     return cfg
 
 
+UID_FORMAT = re.compile(r"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){7}$")
+PLAYLIST_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
+
+
+def check_url(url):
+    """A YouTube http(s) URL, or a ValueError. Anything else cannot be a
+    playlist here, and the string ends up on a command line and in a config
+    file."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme not in ("http", "https") or parts.hostname not in PLAYLIST_HOSTS:
+        raise ValueError("not a YouTube URL")
+    if any(ord(c) < 32 or c in "\"\\" for c in url):
+        raise ValueError("URL has characters it cannot have")
+    return url
+
+
 def set_card(path, uid, url):
     """Add, change or (with url None) remove one card in cards.toml, keeping
     everything above the [cards] table as it is."""
+    if not UID_FORMAT.match(uid):
+        raise ValueError("a UID is eight hex bytes with colons")
+    if url is not None:
+        check_url(url)
     with open(path) as f:
         text = f.read()
     head, _, body = text.partition("[cards]\n")
@@ -73,7 +94,8 @@ def set_card(path, uid, url):
         cards.pop(rid, None)
     else:
         cards[rid] = (cards.get(rid, (uid.upper(), None))[0], url)
-    lines = [f'"{key}" = "{value}"' for key, value in sorted(cards.values())]
+    # json.dumps makes a valid TOML basic string: same quoting and escapes.
+    lines = [f"{json.dumps(key)} = {json.dumps(value)}" for key, value in sorted(cards.values())]
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         f.write(head + "[cards]\n" + "\n".join(lines) + ("\n" if lines else ""))
@@ -124,7 +146,7 @@ def run(cmd, **kw):
 def list_videos(url):
     """(title, [video ids]) for a playlist or single-video URL, no login."""
     out = run(
-        ["yt-dlp", "-q", "--no-warnings", "--flat-playlist", "-J", url],
+        ["yt-dlp", "-q", "--no-warnings", "--flat-playlist", "-J", "--", url],
         stdout=subprocess.PIPE,
     ).stdout
     info = json.loads(out)
@@ -142,6 +164,7 @@ def download_audio(url, dest):
             "yt-dlp", "-q", "--no-warnings", "--ignore-errors",
             "-f", "bestaudio", "-x", "--audio-format", "opus",
             "-o", os.path.join(dest, "%(playlist_index|1)03d [%(id)s].%(ext)s"),
+            "--",
             url,
         ]
     )
@@ -354,10 +377,13 @@ class Service:
         return out
 
     def set_url(self, uid, url):
+        # A save with the same URL changes nothing; a new URL renders on the
+        # next pass only if its videos differ, as any edit does. Only "render
+        # again" forces one: a fresh render is a new version to the box, and
+        # the box downloads it again and starts the story over.
+        if (url or None) == self.cfg()["cards"].get(ruid(uid)):
+            return
         set_card(self.config_path, uid, url or None)
-        if url:
-            with self.lock:
-                self.force.add(ruid(uid))
         self.wake.set()
 
     def render_again(self, rid):
@@ -383,6 +409,17 @@ def serve_web(service, port):
             self.wfile.write(body)
 
         def body_json(self):
+            # Only the page itself may write: a form posted from another
+            # site cannot send this content type, and a browser says when
+            # a request crosses sites.
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                raise ValueError("JSON only")
+            site = self.headers.get("Sec-Fetch-Site")
+            if site not in (None, "same-origin", "none"):
+                raise ValueError("requests from other sites are refused")
+            origin = self.headers.get("Origin")
+            if origin and urllib.parse.urlsplit(origin).hostname != (self.headers.get("Host") or "").split(":")[0]:
+                raise ValueError("requests from other sites are refused")
             n = int(self.headers.get("Content-Length") or 0)
             return json.loads(self.rfile.read(n) or b"{}")
 
@@ -403,7 +440,11 @@ def serve_web(service, port):
                     service.set_url(body["uid"], body.get("url", "").strip())
                     return self.send(200, b"{}")
                 if self.path.startswith("/api/render/"):
-                    service.render_again(self.path.rsplit("/", 1)[1])
+                    self.body_json()  # the same same-site checks
+                    rid = self.path.rsplit("/", 1)[1]
+                    if not re.fullmatch(r"[0-9a-f]{16}", rid):
+                        raise ValueError("not a card")
+                    service.render_again(rid)
                     return self.send(200, b"{}")
             except Exception as e:
                 return self.send(400, json.dumps({"error": f"{e}"}).encode())

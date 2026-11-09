@@ -30,6 +30,9 @@
 <div id="cards"><p class="empty">Loading…</p></div>
 <script>
 const fmtBytes = b => b ? (b / 1e6).toFixed(1) + " MB" : "";
+// Everything from the server is text, never markup.
+const esc = s => String(s ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+const post = (url, body) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
 async function load() {
   const box = document.getElementById("cards");
   let cards;
@@ -38,7 +41,7 @@ async function load() {
     cards = await r.json();
     if (cards.error) throw new Error(cards.error);
   } catch (e) {
-    box.innerHTML = `<p class="err">Could not reach TeddyCloud: ${e.message}</p>`;
+    box.innerHTML = `<p class="err">Could not reach TeddyCloud: ${esc(e.message)}</p>`;
     return;
   }
   if (!cards.length) { box.innerHTML = '<p class="empty">No cards yet. Tap one on the box.</p>'; return; }
@@ -47,20 +50,20 @@ async function load() {
     const el = document.createElement("div");
     el.className = "card";
     const status = c.busy ? '<span class="meta">rendering…</span>'
-      : c.error ? `<span class="err">${c.error}</span>`
-      : c.rendered ? `<span class="meta"><span class="ok">✓</span> ${c.videos} chapters, ${fmtBytes(c.bytes)}, rendered ${c.rendered.replace("T", " ")}</span>`
+      : c.error ? `<span class="err">${esc(c.error)}</span>`
+      : c.rendered ? `<span class="meta"><span class="ok">✓</span> ${esc(c.videos)} chapters, ${fmtBytes(c.bytes)}, rendered ${esc(c.rendered).replace("T", " ")}</span>`
       : c.url ? '<span class="meta">waiting for first render</span>'
-      : c.tonie ? `<span class="meta">${c.tonie}</span>`
-      : c.source ? `<span class="meta">${c.tracks} chapters from ${c.source}</span>`
+      : c.tonie ? `<span class="meta">${esc(c.tonie)}</span>`
+      : c.source ? `<span class="meta">${esc(c.tracks)} chapters from ${esc(c.source)}</span>`
       : '<span class="meta">nothing assigned yet</span>';
     el.innerHTML = `
-      <div class="row"><span class="title">${c.title || c.tonie || "Card"}</span><span class="uid">${c.uid}</span></div>
+      <div class="row"><span class="title">${esc(c.title || c.tonie || "Card")}</span><span class="uid">${esc(c.uid)}</span></div>
       <div>${status}</div>
-      <form data-uid="${c.uid}">
-        <input type="url" name="url" placeholder="https://youtube.com/playlist?list=…" value="${c.url || ""}">
+      <form data-uid="${esc(c.uid)}">
+        <input type="url" name="url" placeholder="https://youtube.com/playlist?list=…" value="${esc(c.url || "")}">
         <button class="primary" type="submit">${c.url ? "Save" : "Assign"}</button>
-        ${c.url ? `<button type="button" data-render="${c.ruid}">Render again</button>` : ""}
-        ${c.url ? `<button type="button" data-clear="${c.uid}">Remove</button>` : ""}
+        ${c.url ? `<button type="button" data-render="${esc(c.ruid)}">Render again</button>` : ""}
+        ${c.url ? `<button type="button" data-clear="${esc(c.uid)}">Remove</button>` : ""}
       </form>`;
     box.appendChild(el);
   }
@@ -68,13 +71,14 @@ async function load() {
 document.addEventListener("submit", async e => {
   e.preventDefault();
   const f = e.target;
-  await fetch("/api/cards", { method: "POST", body: JSON.stringify({ uid: f.dataset.uid, url: f.url.value }) });
+  const r = await post("/api/cards", { uid: f.dataset.uid, url: f.url.value });
+  if (!r.ok) alert((await r.json()).error || "refused");
   load();
 });
 document.addEventListener("click", async e => {
   const b = e.target;
-  if (b.dataset.render) { await fetch("/api/render/" + b.dataset.render, { method: "POST" }); load(); }
-  if (b.dataset.clear) { await fetch("/api/cards", { method: "POST", body: JSON.stringify({ uid: b.dataset.clear, url: "" }) }); load(); }
+  if (b.dataset.render) { await post("/api/render/" + b.dataset.render); load(); }
+  if (b.dataset.clear) { await post("/api/cards", { uid: b.dataset.clear, url: "" }); load(); }
 });
 load();
 setInterval(load, 10000);
