@@ -850,6 +850,14 @@ fn ears_skip() -> bool {
     critical_section::with(|cs| SETTINGS.borrow_ref(cs).config().ears_skip)
 }
 
+/// How long the box may do nothing before it switches itself off, as the
+/// card last said, in milliseconds. Read on each event like `ears_skip`.
+fn idle_timeout_ms() -> u64 {
+    let minutes =
+        critical_section::with(|cs| SETTINGS.borrow_ref(cs).config().idle_timeout_minutes);
+    u64::from(minutes) * 60 * 1_000
+}
+
 /// Access points one scan will report.
 ///
 /// **16 is a tested limit.** At 48, `scan_async` never returned, on every
@@ -1527,6 +1535,7 @@ fn apply(reducer: &mut Core, card: &storage::Mounted, event: Event, token: Optio
     // Updated on every event, not once a second with the tick, so a press
     // right after `ears skip off` already uses the new setting. It is cheap.
     reducer.note_ears_skip(ears_skip());
+    reducer.note_idle_timeout(idle_timeout_ms());
     let index = CardIndex::new(card);
     for action in reducer.handle(event, &index) {
         perform(action, &index, token);

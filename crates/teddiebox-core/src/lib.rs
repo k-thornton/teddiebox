@@ -276,6 +276,15 @@ impl Core {
         self.ears_skip = skips;
     }
 
+    /// Sets how long the box may do nothing before it switches itself off
+    /// (`idle_timeout` on the card).
+    ///
+    /// Like [`Core::note_ears_skip`], read from the settings on every event
+    /// rather than once: the card is mounted after this `Core` is built.
+    pub fn note_idle_timeout(&mut self, ms: Millis) {
+        self.config.idle_timeout_ms = ms;
+    }
+
     /// Whether the box is busy with anything.
     ///
     /// A download counts: a whole story takes longer to download than the
@@ -1151,6 +1160,29 @@ mod tests {
         ));
         assert!(contains(
             &a_timeout_later,
+            Action::PowerOff(PowerOffReason::Idle)
+        ));
+    }
+
+    /// `idle_timeout` on the card replaces the stock ten minutes.
+    #[test]
+    fn the_idle_timeout_from_the_card_replaces_the_default() {
+        // Given: a two-minute timeout
+        let mut c = core();
+        c.note_idle_timeout(2 * 60 * 1_000);
+        c.handle(Event::Tick(0), &Index);
+
+        // When
+        let a_minute_later = c.handle(Event::Tick(60 * 1_000), &Index);
+        let two_minutes_later = c.handle(Event::Tick(2 * 60 * 1_000), &Index);
+
+        // Then
+        assert!(!contains(
+            &a_minute_later,
+            Action::PowerOff(PowerOffReason::Idle)
+        ));
+        assert!(contains(
+            &two_minutes_later,
             Action::PowerOff(PowerOffReason::Idle)
         ));
     }

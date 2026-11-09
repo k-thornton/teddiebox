@@ -41,6 +41,10 @@ pub const MAX_SERVER: usize = 64;
 /// The example on [`Config::update_url`] is 55 characters; 128 leaves room for
 /// a longer path.
 pub const MAX_UPDATE_URL: usize = 128;
+/// Ten minutes without a figure, a press or a download, as on a stock box.
+pub const DEFAULT_IDLE_TIMEOUT_MINUTES: u16 = 10;
+/// A day. Longer is a box that never switches off, which `awake on` is for.
+pub const MAX_IDLE_TIMEOUT_MINUTES: u16 = 24 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -62,6 +66,13 @@ pub struct Config {
     /// figure played most recently resumes, and playing another figure in
     /// between starts it over.
     pub resume_every: bool,
+    /// Minutes of nothing happening before the box switches itself off
+    /// (`idle_timeout`).
+    ///
+    /// Defaults to [`DEFAULT_IDLE_TIMEOUT_MINUTES`], the stock box's ten
+    /// minutes. Playing, downloading and charging count as something
+    /// happening. 1 to [`MAX_IDLE_TIMEOUT_MINUTES`].
+    pub idle_timeout_minutes: u16,
     /// Where to fetch the OTA manifest, in full — scheme, host, port and
     /// path, e.g.
     /// `https://teddycloud.local:8443/content/FIRMWARE/teddiebox.txt`.
@@ -233,6 +244,7 @@ impl Settings {
                 server: String::new(),
                 ears_skip: true,
                 resume_every: false,
+                idle_timeout_minutes: DEFAULT_IDLE_TIMEOUT_MINUTES,
                 update_url: None,
                 setup_password: None,
             },
@@ -242,6 +254,7 @@ impl Settings {
                 server: false,
                 ears_skip: false,
                 resume_every: false,
+                idle_timeout_minutes: false,
                 update_url: false,
                 setup_password: false,
             },
@@ -343,6 +356,7 @@ pub struct Overridden {
     pub server: bool,
     pub ears_skip: bool,
     pub resume_every: bool,
+    pub idle_timeout_minutes: bool,
     pub update_url: bool,
     pub setup_password: bool,
 }
@@ -379,6 +393,11 @@ impl Overridden {
             } else {
                 card.resume_every
             },
+            idle_timeout_minutes: if self.idle_timeout_minutes {
+                held.idle_timeout_minutes
+            } else {
+                card.idle_timeout_minutes
+            },
             update_url: if self.update_url {
                 held.update_url.clone()
             } else {
@@ -414,6 +433,7 @@ impl Config {
         let mut server: Option<String<MAX_SERVER>> = None;
         let mut ears_skip = true;
         let mut resume_every = false;
+        let mut idle_timeout_minutes = DEFAULT_IDLE_TIMEOUT_MINUTES;
         let mut update_url: Option<String<MAX_UPDATE_URL>> = None;
         let mut setup_password: Option<String<MAX_PASSWORD>> = None;
 
@@ -434,6 +454,7 @@ impl Config {
                 &mut server,
                 &mut ears_skip,
                 &mut resume_every,
+                &mut idle_timeout_minutes,
                 &mut update_url,
                 &mut setup_password,
             )?;
@@ -451,6 +472,7 @@ impl Config {
                 .ok_or(ConfigError::MissingServer)?,
             ears_skip,
             resume_every,
+            idle_timeout_minutes,
             update_url,
             setup_password,
         })
@@ -470,6 +492,7 @@ fn apply_line(
     server: &mut Option<String<MAX_SERVER>>,
     ears_skip: &mut bool,
     resume_every: &mut bool,
+    idle_timeout_minutes: &mut u16,
     update_url: &mut Option<String<MAX_UPDATE_URL>>,
     setup_password: &mut Option<String<MAX_PASSWORD>>,
 ) -> Result<(), ConfigError> {
@@ -501,6 +524,15 @@ fn apply_line(
             } else {
                 return Err(ConfigError::MalformedValue);
             };
+        }
+        "idle_timeout" => {
+            // Whole minutes, at least one. `0` would be a box that switches
+            // off at once, which nobody means; `awake on` keeps it awake.
+            *idle_timeout_minutes = strip_comment(value)
+                .parse::<u16>()
+                .ok()
+                .filter(|m| (1..=MAX_IDLE_TIMEOUT_MINUTES).contains(m))
+                .ok_or(ConfigError::MalformedValue)?;
         }
         // No comment stripping, like `password`.
         "setup_password" => {
@@ -921,6 +953,48 @@ mod tests {
         // Then
         assert_eq!(parsed, Err(ConfigError::NotText));
     }
+
+    /// A card without `idle_timeout` switches off after ten minutes, as a
+    /// stock box does.
+    #[test]
+    fn a_missing_idle_timeout_key_is_the_stock_ten_minutes() {
+        // Given
+        let text = "ssid = home\nserver = box.lan:8080\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
+        assert_eq!(c.idle_timeout_minutes, 10);
+    }
+
+    #[test]
+    fn idle_timeout_is_read_in_minutes_with_a_comment_allowed() {
+        // Given
+        let text = "ssid = home\nserver = box.lan:8080\nidle_timeout = 30 # half an hour\n";
+
+        // When
+        let c = Config::parse(text).unwrap();
+
+        // Then
+        assert_eq!(c.idle_timeout_minutes, 30);
+    }
+
+    /// Zero, a fraction, a unit or a day and more are not what was meant.
+    #[test]
+    fn an_idle_timeout_that_is_not_whole_minutes_in_range_is_refused() {
+        for value in ["0", "2.5", "10m", "", "1441", "ten"] {
+            // Given
+            let text = format!("ssid = home\nserver = box.lan:8080\nidle_timeout = {value}\n");
+
+            // When
+            let err = Config::parse(&text).unwrap_err();
+
+            // Then
+            assert_eq!(err, ConfigError::MalformedValue, "{value:?}");
+        }
+    }
+
     fn card() -> Config {
         Config::parse("ssid = FromCard\npassword = cardpw\nserver = card:1\nears_skip = no\n")
             .unwrap()
