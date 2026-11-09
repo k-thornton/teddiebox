@@ -49,6 +49,15 @@ def load_config(path):
     cfg.setdefault("library_dir", "tonietube")
     cfg.setdefault("bitrate", 96)
     cfg.setdefault("cards", {})
+    # TeddyCloud's optional web login: a user name in the config, the
+    # password in its own file next to it (so the config can be shared).
+    cfg.setdefault("teddycloud_user", None)
+    cfg["teddycloud_password"] = None
+    pw_file = cfg.get("teddycloud_password_file", "teddycloud.password")
+    pw_path = os.path.join(os.path.dirname(os.path.abspath(path)), pw_file)
+    if cfg["teddycloud_user"] and os.path.exists(pw_path):
+        with open(pw_path) as f:
+            cfg["teddycloud_password"] = f.read().strip()
     if cfg.get("ca_file"):  # relative to the config file
         cfg["ca_file"] = os.path.join(os.path.dirname(os.path.abspath(path)), cfg["ca_file"])
     cfg["cards"] = {ruid(uid): url for uid, url in cfg["cards"].items()}
@@ -187,9 +196,15 @@ def build_taf(audio_dir, out_path, bitrate):
 # --- teddycloud -----------------------------------------------------------
 
 
+# The name of TeddyCloud's web session cookie.
+SESSION_COOKIE = "tc_web_session"
+
+
 class TeddyCloud:
-    def __init__(self, base, ca_file=None):
+    def __init__(self, base, ca_file=None, user=None, password=None):
         self.base = base.rstrip("/")
+        self.user, self.password = user, password
+        self.token = None
         # TeddyCloud's cert is CN "TeddyCloud Server" with no SANs (the box
         # insists on that), so the hostname can't match. Pin its CA instead.
         ctx = ssl.create_default_context(cafile=ca_file)
@@ -199,10 +214,34 @@ class TeddyCloud:
             ctx.verify_mode = ssl.CERT_NONE
         self.opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
 
-    def _call(self, path, data=None, headers=None, timeout=60):
-        req = urllib.request.Request(self.base + path, data=data, headers=headers or {})
-        with self.opener.open(req, timeout=timeout) as r:
-            return r.read()
+    def _call(self, path, data=None, headers=None, timeout=60, _retry=True):
+        headers = dict(headers or {})
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+            headers["Cookie"] = f"{SESSION_COOKIE}={self.token}"
+        req = urllib.request.Request(self.base + path, data=data, headers=headers)
+        try:
+            with self.opener.open(req, timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            # The web login is on and the session is missing or expired:
+            # log in once and repeat the call.
+            if e.code == 401 and _retry and self.user and self.password:
+                self.login()
+                return self._call(path, data, headers, timeout, _retry=False)
+            raise
+
+    def login(self):
+        body = json.dumps({"username": self.user, "password": self.password}).encode()
+        req = urllib.request.Request(
+            self.base + "/api/auth/login", data=body, headers={"Content-Type": "application/json"}
+        )
+        with self.opener.open(req, timeout=30) as r:
+            answer = json.loads(r.read())
+        self.token = answer.get("token")
+        if not self.token:
+            raise RuntimeError("TeddyCloud login gave no token")
+        log.info("logged in to TeddyCloud as %s", self.user)
 
     def get_json(self, path):
         return json.loads(self._call(path))
@@ -344,7 +383,9 @@ class Service:
 
     def client(self, cfg=None):
         cfg = cfg or self.cfg()
-        return TeddyCloud(cfg["teddycloud"], cfg.get("ca_file"))
+        return TeddyCloud(
+            cfg["teddycloud"], cfg.get("ca_file"), cfg["teddycloud_user"], cfg["teddycloud_password"]
+        )
 
     def run_once(self, force_all=False):
         cfg = self.cfg()

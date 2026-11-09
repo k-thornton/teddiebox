@@ -4,6 +4,9 @@
 
 teddycloud = "https://192.168.50.188:8443"
 ca_file = "teddycloud-ca.pem"  # TeddyCloud's CA, so the connection is verified
+# With TeddyCloud's web login on: the user, and its password in a file
+# beside this one (teddycloud.password, mode 600).
+# teddycloud_user = "kyle"
 interval_minutes = 30
 library_dir = "tonietube"   # folder inside TeddyCloud's library
 bitrate = 96                # kbps Opus in the TAF (stock tonies use 96)

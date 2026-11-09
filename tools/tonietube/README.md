@@ -21,6 +21,10 @@ the page as `tonietube/ui.html` and its status as `tonietube/status.json` in
 TeddyCloud's library, and the page writes `tonietube/cards.json` there, which
 the service reads every few seconds and applies to `cards.toml`.
 
+If TeddyCloud's web login is on, set `teddycloud_user` in `cards.toml` and
+put the password in `teddycloud.password` beside it (mode 600); the service
+logs in and renews its session on a 401.
+
 Each pass (every `interval_minutes`, and the file is re-read each time), every
 card's playlist is listed. When its set of videos differs from the last render,
 the audio is downloaded, packed into one TAF with one chapter per video
