@@ -17,6 +17,10 @@ last render, and has a "render again" button. It edits the same `cards.toml`
 and wakes the service, so an assignment renders within a couple of minutes.
 `web_port = 0` turns the page off.
 
+`plugin/` is a TeddyCloud plugin that puts the page in TeddyCloud's Tonies
+menu as "Playlists"; it opens the page in a new tab. Install it by copying
+the folder to `/var/lib/teddycloud/plugins/tonietube/` on the server.
+
 Each pass (every `interval_minutes`, and the file is re-read each time), every
 card's playlist is listed. When its set of videos differs from the last render,
 the audio is downloaded, packed into one TAF with one chapter per video

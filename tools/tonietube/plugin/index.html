@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Playlists</title>
+<script>
+  // tonietube serves its own page from this same machine on port 8080.
+  // TeddyCloud opens a standalone plugin in a new tab, so this just goes there.
+  location.replace("http://" + location.hostname + ":8080/");
+</script>
+</head>
+<body>
+<p>Opening the playlists page… <a id="link">continue</a></p>
+<script>document.getElementById("link").href = "http://" + location.hostname + ":8080/";</script>
+</body>
+</html>

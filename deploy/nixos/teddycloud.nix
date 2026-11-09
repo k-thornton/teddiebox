@@ -19,7 +19,7 @@ in
   virtualisation.oci-containers.backend = "podman";
   virtualisation.oci-containers.containers.teddycloud = {
     # Pinned so a rebuild never upgrades it; bump deliberately.
-    image = "ghcr.io/toniebox-reverse-engineering/teddycloud:tc_v0.7.0";
+    image = "ghcr.io/toniebox-reverse-engineering/teddycloud:tc_v0.7.1";
     ports = [
       "443:443" # the box connects here; must stay 443
       "8443:8443" # web interface and API (HTTPS)
