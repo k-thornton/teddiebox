@@ -38,9 +38,9 @@ pub enum Fresh {
     Changed,
     /// The server holds the same story, or knows nothing newer.
     Current,
-    /// The server did not answer the question (any status but `200`).
-    /// Nothing is contradicted, so the card's copy stays.
-    Unstated,
+    /// The server did not answer the question: any status but `200`, kept
+    /// for the console. Nothing is contradicted, so the card's copy stays.
+    Unstated { status: u16 },
 }
 
 /// The identifier as the stock box puts it on the wire.
@@ -183,7 +183,9 @@ pub async fn check<T: Read + Write>(
 
     let (head, body_at, received) = read_head(transport, buf).await?;
     if head.status != 200 {
-        return Ok(Fresh::Unstated);
+        return Ok(Fresh::Unstated {
+            status: head.status,
+        });
     }
     let length = head.content_length.ok_or(CloudError::LengthRequired)? as usize;
     let end = body_at
@@ -489,7 +491,7 @@ mod tests {
         .unwrap();
 
         // Then
-        assert_eq!(fresh, Fresh::Unstated);
+        assert_eq!(fresh, Fresh::Unstated { status: 500 });
     }
 
     #[test]

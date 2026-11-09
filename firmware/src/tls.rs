@@ -325,7 +325,6 @@ pub fn init(sha: SHA<'static>, rsa: RSA<'static>, aes: AES<'static>) -> Option<C
         tls: TLS.try_init(tls)?.reference(),
         credentials: RefCell::new(None),
         warmed: core::cell::Cell::new(false),
-        resumable: RefCell::new(None),
     })
 }
 
@@ -347,18 +346,6 @@ pub struct Client {
     credentials: RefCell<Option<Credentials<'static>>>,
     /// Whether the parsed key has had its first private operation.
     warmed: core::cell::Cell<bool>,
-    /// The last session the server agreed, offered back on the next
-    /// connection so it can skip the key exchange and the client signature.
-    ///
-    /// Measured on the box: a resumed handshake takes 57 ms against 1.25 s
-    /// for a full one. It uses 1.9 KB of heap. If the server has forgotten the
-    /// session, it just does a full handshake.
-    ///
-    /// Resuming skips checking the server's certificate again, which TLS 1.2
-    /// allows because the session was agreed with a verified server.
-    /// mbedtls-rs also refuses a session saved for another server name, and
-    /// every connection here uses [`SERVER_IDENTITY`].
-    resumable: RefCell<Option<mbedtls_rs::SavedSession>>,
 }
 
 impl Client {
@@ -371,34 +358,23 @@ impl Client {
         held.clone()
     }
 
-    /// Runs the handshake, offering the last session for resumption, and keeps
-    /// what the server agreed for the next one.
+    /// Runs a full handshake, every time.
     ///
-    /// If the server has forgotten the session, it does a full handshake;
-    /// not an error.
+    /// **Never a resumed one.** teddyCloud knows the box by its client
+    /// certificate, which only a full handshake carries: on a resumed session
+    /// it answered every request, downloads included, with `401`. A resumed
+    /// handshake took 57 ms against 1.25 s for a full one, so the saving was
+    /// real, but a request the server refuses saves nothing.
     async fn handshake<T>(&self, session: &mut Session<'_, T>) -> Result<(), Error>
     where
         T: mbedtls_rs::io::Read + mbedtls_rs::io::Write,
     {
-        // Taken, not borrowed: a `RefCell` borrow cannot be held across the
-        // awaits below.
-        let offered = self.resumable.borrow_mut().take();
         let started = Instant::now();
-        match &offered {
-            Some(saved) => session.connect_with_session(saved).await,
-            None => session.connect().await,
-        }
-        .map_err(Error::Handshake)?;
+        session.connect().await.map_err(Error::Handshake)?;
         esp_println::println!(
-            "teddiebox: tls handshake {} ms{}",
-            started.elapsed().as_millis(),
-            if offered.is_some() {
-                ", resumption offered"
-            } else {
-                ""
-            }
+            "teddiebox: tls handshake {} ms",
+            started.elapsed().as_millis()
         );
-        *self.resumable.borrow_mut() = session.save().ok();
         Ok(())
     }
 
@@ -592,13 +568,13 @@ pub async fn probe(client: &Client, stack: &Stack<'_>, server: &str) -> Result<(
     Ok(())
 }
 
-/// Opens a session with the box's identity and closes it again, so that the
-/// next connection can resume it.
+/// Opens a session with the box's identity and closes it again.
 ///
 /// The first request after boot is slow: it scans for the network, sets up
-/// the key and runs a full handshake (5.1 s from placement to playing,
-/// against about 2.3 s later). Doing this at boot makes the first figure
-/// fast too.
+/// the key and runs a handshake (5.1 s from placement to playing, against
+/// about 2.3 s later). Doing this at boot takes the network scan and the key
+/// set-up off the first figure; the handshake itself is repeated, since the
+/// server does not accept a resumed session (see [`Client::handshake`]).
 pub async fn prime(client: &Client, stack: &Stack<'_>, server: &str) -> Result<(), Error> {
     let mut name = [0u8; MAX_NAME];
     let (_host, address, port) = resolve(stack, server, &mut name).await?;
