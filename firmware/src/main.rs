@@ -20,6 +20,7 @@ mod setup;
 mod sleep;
 mod stack;
 mod storage;
+mod stream;
 mod tls;
 mod update;
 mod wifikey;
@@ -452,15 +453,18 @@ static PLAYING: AtomicBool = AtomicBool::new(false);
 /// How far ahead the download is of whatever is waiting on it.
 ///
 /// The download is not told how far playback has got, so it always reports
-/// "nobody is waiting", expressed as a lead that can never be reached. Once
-/// playback shares its position, this becomes the written length minus the
-/// decoder's position, and the thresholds below take effect.
+/// "nobody is waiting", expressed as a lead that can never be reached. While
+/// a story plays from the download ([`stream::lead`]), the lead is the written
+/// length minus the decoder's position, and the thresholds below take effect.
 const NOTHING_WAITING: Pages = Pages(u32::MAX);
-/// Fetch again once the decoder is within this many pages of the write head.
-const RESUME_BELOW: Pages = Pages(8);
-/// Stop once it is this far ahead. The gap between the two keeps the radio
-/// from switching on and off for every page the decoder reads.
-const PAUSE_ABOVE: Pages = Pages(32);
+/// Fetch again once the decoder is within this many pages of the write head:
+/// 16 pages is about five seconds of audio at 96 kbps.
+const RESUME_BELOW: Pages = Pages(16);
+/// Stop once it is this far ahead, about twenty seconds. The gap between the
+/// two keeps the radio from switching on and off for every page the decoder
+/// reads; wide, because each burst of receiving can be heard as a restart of
+/// the audio DMA on this one core.
+const PAUSE_ABOVE: Pages = Pages(64);
 
 /// A download being written to the card.
 ///
@@ -632,8 +636,16 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
                                 transfer(Transfer::open_failed);
                                 return false;
                             }
+                            // A story written from the beginning is a new
+                            // story: it starts at the start, not where the
+                            // one it replaces was left.
+                            let mut out = [0u8; MAX_POSITION];
+                            let len = position::render(0, &mut out);
+                            let _ = card.write_position(false, dir, file, &out[..len]);
+                            forget_place(((dir as u64) << 32) | file as u64);
                         }
                     }
+                    stream::begin(dir, file, handle, at, transfer(|t| t.total()));
                     *write = Some(CacheWrite {
                         file: handle,
                         // From zero even for a resume: it counts what the
@@ -691,6 +703,11 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
     }
 
     let written = active.writer.watermark().0;
+    stream::advance(written);
+    // Enough on the card to start playing while the rest arrives.
+    if stream::ready_to_start() {
+        transfer(Transfer::streamable);
+    }
     let Some(finished) = transfer(|t| t.finish(written)) else {
         return true;
     };
@@ -702,7 +719,12 @@ fn service_download(card: Option<&storage::Mounted>, write: &mut Option<CacheWri
         finished.written,
         active.crc.finish()
     );
-    card.close_appended(active.file);
+    // A playback reading through this handle closes it when it is done.
+    if stream::writer_done(finished.whole) {
+        card.close_appended(active.file);
+    } else {
+        card.release_appended();
+    }
     *write = None;
     if !finished.whole {
         esp_println::println!(
@@ -1244,6 +1266,13 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         Action::Pause | Action::Stop => {
             esp_println::println!("teddiebox: plate stopping");
             audio::STOP.store(true, Ordering::Relaxed);
+            // A story that was still downloading stops downloading too, as a
+            // lift during a plain download does. The partial file keeps its
+            // sidecar, so the next placement continues it.
+            if stream::is_writing() {
+                esp_println::println!("teddiebox: plate abandoning the download with the story");
+                transfer(Transfer::abort);
+            }
         }
 
         // Limits and steps are handled by the reducer; this only passes on
@@ -1318,7 +1347,12 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     (seen == tag).then_some(kept).flatten()
                 })
             });
-            let audio_id = index.audio_id(tag).unwrap_or(0);
+            // The story that just stopped may still be open, so the header
+            // remembered at playback comes first and the card second.
+            let path = teddiebox_download::content_path(tag.0);
+            let audio_id = audio::played_audio_id(path.directory, path.file)
+                .or_else(|| index.audio_id(tag))
+                .unwrap_or(0);
             esp_println::println!(
                 "teddiebox: plate asking the server about {ruid:016X}, version {audio_id:08X}"
             );
@@ -1631,6 +1665,7 @@ async fn play_story(
     reducer: &mut Core,
     placed: &mut Placed,
     last_tick_fed: &mut u64,
+    download: &mut Option<CacheWrite>,
 ) {
     let Some(card) = card else {
         return;
@@ -1678,6 +1713,7 @@ async fn play_story(
             reducer,
             placed,
             last_tick_fed,
+            download,
         )
         .await;
     }
@@ -1698,6 +1734,7 @@ async fn play_taf_story(
     reducer: &mut Core,
     placed: &mut Placed,
     last_tick_fed: &mut u64,
+    download: &mut Option<CacheWrite>,
 ) {
     let source = match request {
         REQUEST_CONTENT | REQUEST_CACHE => audio::Source::Content {
@@ -1737,6 +1774,10 @@ async fn play_taf_story(
         reducer.note_position(Position::Exact {
             page: audio::PAGE.load(Ordering::Relaxed),
         });
+
+        // A story playing while it downloads: the bytes reach the card from
+        // here, between frames, since this loop holds the media task.
+        service_download(Some(card), download);
     };
     // The hardware is returned, so another story can play without a
     // reboot.
@@ -2115,6 +2156,7 @@ async fn media(
                     &mut reducer,
                     &mut placed,
                     &mut last_tick_fed,
+                    &mut download,
                 )
                 .await;
             }
@@ -2523,7 +2565,7 @@ async fn fetch_story(
             transfer(|t| t.should_stop()),
             throttle.update(
                 PLAYING.load(Ordering::Relaxed),
-                NOTHING_WAITING,
+                stream::lead().unwrap_or(NOTHING_WAITING),
                 RESUME_BELOW,
                 PAUSE_ABOVE,
             ),

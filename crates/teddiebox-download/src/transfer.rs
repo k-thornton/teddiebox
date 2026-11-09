@@ -247,6 +247,19 @@ impl Transfer {
         self.aborted
     }
 
+    /// How long the server said the whole file is, once the head arrived.
+    pub fn total(&self) -> Option<u32> {
+        self.head.total
+    }
+
+    /// Enough of the body is on the card to start playing. Reported only
+    /// while the download runs; a finished one reports its own outcome.
+    pub fn streamable(&mut self) {
+        if self.phase == Phase::Running {
+            self.outcomes.report(Outcome::Streamable, self.figure);
+        }
+    }
+
     /// The producer handed `bytes` more to the pipe.
     pub fn sent(&mut self, bytes: u32) {
         self.sent = self.sent.wrapping_add(bytes);
@@ -401,6 +414,49 @@ impl Transfer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_download_reports_streamable_for_its_figure() {
+        // Given
+        let path = ContentPath {
+            directory: 1,
+            file: 2,
+        };
+        let mut t = Transfer::new();
+        t.start(7);
+        assert!(t.ask(path));
+        t.planned(Plan {
+            says: CardSays::Nothing,
+            on_card: 0,
+            expected: None,
+            resume_etag: None,
+        });
+        t.headers(Head {
+            at: 0,
+            total: Some(4_096_000),
+            etag: None,
+        });
+
+        // When
+        t.streamable();
+
+        // Then
+        assert_eq!(t.take_outcome(), Some((Outcome::Streamable, 7)));
+        assert_eq!(t.total(), Some(4_096_000));
+    }
+
+    #[test]
+    fn streamable_is_ignored_unless_a_download_is_running() {
+        // Given
+        let mut t = Transfer::new();
+        t.start(7);
+
+        // When
+        t.streamable();
+
+        // Then
+        assert_eq!(t.take_outcome(), None);
+    }
 
     const FIGURE: u64 = 0xE0_04_03_50_1A_2B_3C_4D;
     const OTHER_FIGURE: u64 = 0xE0_04_03_50_99_88_77_66;

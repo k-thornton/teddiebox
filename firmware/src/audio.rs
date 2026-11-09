@@ -7,7 +7,9 @@
 //! Buffer accounting ([`teddiebox_core::cushion`]) and WAV header parsing
 //! ([`teddiebox_core::wav`]) are tested on the host. This file drives the DMA.
 
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicI8, AtomicU32, AtomicU8};
+use critical_section::Mutex as CsMutex;
 use portable_atomic::Ordering;
 
 use embassy_futures::yield_now;
@@ -284,6 +286,24 @@ static mut SCRATCH: DecodeScratch = DecodeScratch {
     pcm: [0; MAX_FRAME_SAMPLES],
 };
 static SCRATCH_TAKEN: AtomicBool = AtomicBool::new(false);
+
+/// The `CONTENT/` story last opened for playback, with its header's
+/// `audio_id`.
+///
+/// For the freshness check, which is queued as the story stops, while this
+/// task may still hold the file open: the card refuses to open a file twice,
+/// so the index cannot read the header then. Remembered here instead.
+static PLAYED_AUDIO_ID: CsMutex<RefCell<Option<((u32, u32), u32)>>> =
+    CsMutex::new(RefCell::new(None));
+
+/// The `audio_id` of `CONTENT/<directory>/<file>`, if it was the last story
+/// opened for playback.
+pub fn played_audio_id(directory: u32, file: u32) -> Option<u32> {
+    critical_section::with(|cs| match *PLAYED_AUDIO_ID.borrow_ref(cs) {
+        Some((path, id)) if path == (directory, file) => Some(id),
+        _ => None,
+    })
+}
 
 /// The scratch measured as plain memory, for whoever borrows it wholesale.
 ///
@@ -611,16 +631,26 @@ type Transfer = I2sTxDmaTransfer<'static, Blocking, DmaTxStreamBuf>;
 /// A `.TAF` in the root is used first, so a specific file can be tested.
 /// Otherwise the card's own content is used, so nothing has to be written to
 /// the card.
-fn open_source(card: &Mounted, source: Source) -> Result<(RawFile, u32), &'static str> {
-    match source {
-        Source::Content { directory, file } => card.open_content(directory, file),
+/// Opens the story, or borrows the handle of a download still writing it.
+///
+/// The third value says which: a borrowed handle is the download's to close.
+fn open_source(card: &Mounted, source: &Source) -> Result<(RawFile, u32, bool), &'static str> {
+    match *source {
+        Source::Content { directory, file } => {
+            if let Some((handle, total)) = crate::stream::reader_begin(directory, file) {
+                return Ok((handle, total, true));
+            }
+            card.open_content(directory, file)
+                .map(|(handle, size)| (handle, size, false))
+        }
         Source::First => match card.find_by_extension(b"TAF") {
             Some((name, size)) => {
                 esp_println::println!("teddiebox: taf /{name}, {size} bytes");
-                card.open_file(name).map(|handle| (handle, size))
+                card.open_file(name).map(|handle| (handle, size, false))
             }
             None => card
                 .open_first_tonie()
+                .map(|(handle, size)| (handle, size, false))
                 .ok_or("no .TAF in the root and no CONTENT/<hex>/500304E0 on the card"),
         },
     }
@@ -918,27 +948,46 @@ fn next_chunk(
 /// closes the file, matching the caller's own later failure paths.
 fn open_taf<'s>(
     card: &'s Mounted,
-    source: Source,
+    source: &Source,
     opus_scratch: &'s mut OpusState,
     taf_scratch: &'s mut TafBuffers,
-) -> Result<(RawFile, TafDecoder<'s, CardPages<'s>, LibOpus<'s>>), &'static str> {
-    let (file, size) = open_source(card, source)?;
-    esp_println::println!("teddiebox: taf {size} bytes");
+) -> Result<(RawFile, bool, TafDecoder<'s, CardPages<'s>, LibOpus<'s>>), &'static str> {
+    let (file, size, borrowed) = open_source(card, source)?;
+    let streaming = match (source, borrowed) {
+        (Source::Content { directory, file }, true) => Some((*directory, *file)),
+        _ => None,
+    };
+    esp_println::println!(
+        "teddiebox: taf {size} bytes{}",
+        if borrowed { ", still downloading" } else { "" }
+    );
     let pages = CardPages::new(card, file, size);
 
     let opus = match LibOpus::new(opus_scratch) {
         Ok(opus) => opus,
         Err(_) => {
-            card.close_file(file);
+            close_story(card, file, streaming);
             return Err("the Opus decoder would not start");
         }
     };
     match TafDecoder::open(pages, opus, taf_scratch) {
-        Ok(decoder) => Ok((file, decoder)),
+        Ok(decoder) => Ok((file, borrowed, decoder)),
         Err(_) => {
-            card.close_file(file);
+            close_story(card, file, streaming);
             Err("not a readable TAF file")
         }
+    }
+}
+
+/// Closes the story's file, unless a download still writes to it through the
+/// same handle; the download closes it then.
+fn close_story(card: &Mounted, file: RawFile, streaming: Option<(u32, u32)>) {
+    let close = match streaming {
+        Some((directory, path_file)) => crate::stream::reader_done(directory, path_file),
+        None => true,
+    };
+    if close {
+        card.close_file(file);
     }
 }
 
@@ -989,18 +1038,29 @@ async fn play_taf_inner(
         return Err(("the decoder is already in use", i2s_tx, buffer));
     };
 
-    let (file, mut decoder) = match open_taf(card, source, &mut scratch.opus, &mut scratch.taf) {
-        Ok(pair) => pair,
-        Err(reason) => {
-            release_scratch();
-            return Err((reason, i2s_tx, buffer));
-        }
+    let played = match source {
+        Source::Content { directory, file } => Some((directory, file)),
+        Source::First => None,
     };
+    let (file, borrowed, mut decoder) =
+        match open_taf(card, &source, &mut scratch.opus, &mut scratch.taf) {
+            Ok(triple) => triple,
+            Err(reason) => {
+                release_scratch();
+                return Err((reason, i2s_tx, buffer));
+            }
+        };
+    // The story is still being downloaded, through the handle just borrowed.
+    let streaming = played.filter(|_| borrowed);
     esp_println::println!(
         "teddiebox: taf audio id {:#010x}, {} chapters",
         decoder.header().audio_id,
         decoder.chapter_count()
     );
+    if let Some(path) = played {
+        let id = decoder.header().audio_id;
+        critical_section::with(|cs| *PLAYED_AUDIO_ID.borrow_ref_mut(cs) = Some((path, id)));
+    }
 
     seek_to_start(&mut decoder, from);
 
@@ -1011,7 +1071,7 @@ async fn play_taf_inner(
         match prefill_and_start(&mut decoder, &mut scratch.pcm, buffer, &mut pcm_crc, i2s_tx) {
             Ok(triple) => triple,
             Err(err) => {
-                card.close_file(file);
+                close_story(card, file, streaming);
                 release_scratch();
                 return Err(err);
             }
@@ -1078,12 +1138,34 @@ async fn play_taf_inner(
                 continue;
             }
             DmaRestart::Failed(err) => {
-                card.close_file(file);
+                close_story(card, file, streaming);
                 release_scratch();
                 return Err(err);
             }
         }
         cushion.observe(BUFFER_BYTES.saturating_sub(transfer.available_bytes()) as u32);
+
+        // A story still downloading: read on only once the card has the
+        // pages. `on_frame` above moves the pipe onto the card each pass, so
+        // waiting here is what lets the download catch up.
+        if let (Some((dir, path_file)), true) = (streaming, pending.is_empty()) {
+            match crate::stream::gate(dir, path_file, decoder.page()) {
+                crate::stream::Gate::Go => {}
+                crate::stream::Gate::Wait => {
+                    Timer::after(Duration::from_millis(5)).await;
+                    last_pass = Instant::now();
+                    continue;
+                }
+                crate::stream::Gate::Lost => {
+                    esp_println::println!(
+                        "teddiebox: taf the download ended before page {} — stopping here",
+                        decoder.page()
+                    );
+                    stopped = true;
+                    break;
+                }
+            }
+        }
 
         match next_chunk(
             pending,
@@ -1147,7 +1229,7 @@ async fn play_taf_inner(
     }
     let (i2s_tx, buffer) = transfer.stop();
 
-    card.close_file(file);
+    close_story(card, file, streaming);
     release_scratch();
 
     log_taf_summary(

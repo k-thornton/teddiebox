@@ -11,6 +11,9 @@
 pub enum Outcome {
     /// The bytes are on the card.
     Completed,
+    /// Enough of the story is on the card to start playing it; the rest is
+    /// still arriving. Reported once, before `Completed`.
+    Streamable,
     /// The server could not be reached, or could not be asked.
     Unreachable,
     /// The server was reached and has nothing filed under that figure.

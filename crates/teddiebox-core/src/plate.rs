@@ -1138,7 +1138,7 @@ pub fn settle_fetch_outcome(
 ) -> Settlement<Event> {
     use teddiebox_download::Outcome;
     answering.resolve(|tag| match outcome {
-        Outcome::Completed => Event::ContentReady(tag),
+        Outcome::Completed | Outcome::Streamable => Event::ContentReady(tag),
         Outcome::Unreachable => Event::ContentMissing(tag, Unavailable::Unreachable),
         Outcome::NoContent => Event::ContentMissing(tag, Unavailable::NoContent),
         Outcome::Refused => Event::ContentMissing(tag, Unavailable::Refused),

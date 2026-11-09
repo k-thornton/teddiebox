@@ -1153,6 +1153,14 @@ impl Mounted {
         self.close_file(file);
         self.volumes.device(|card| card.resume_writes());
     }
+
+    /// Like [`Mounted::close_appended`], without the close: for a download
+    /// whose handle a playback is still reading from. That playback closes
+    /// the file when it is done.
+    pub fn release_appended(&self) {
+        let _ = self.finish_appends();
+        self.volumes.device(|card| card.resume_writes());
+    }
 }
 
 /// Checksums every file under `root`, depth first.
