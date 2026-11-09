@@ -5,8 +5,7 @@
 use core::task::Poll;
 use pollster::block_on;
 use teddiebox_cloud::{
-    begin, begin_prepared, build_path_request, probe_length, Begun, Body, CloudError,
-    ContentRequest, ETag, Probed,
+    begin, begin_prepared, build_path_request, Begun, Body, CloudError, ContentRequest, ETag,
 };
 
 const UID: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -321,88 +320,6 @@ fn a_head_too_long_for_the_buffer_is_an_error_rather_than_a_spin() {
 
     // Then
     assert_eq!(begun, Err(CloudError::ResponseTooLong));
-}
-
-/// The exact response teddyCloud sent to a one-byte probe, including the one
-/// byte of body:
-///
-/// ```text
-/// HTTP/1.1 206 Partial Content
-/// Connection: keep-alive
-/// Keep-Alive: timeout=300, max=4294967294
-/// Accept-Ranges: bytes
-/// Content-Type: application/octet-stream
-/// Content-Range: bytes 1-1/37912939
-/// Content-Length: 1
-/// ```
-#[test]
-fn a_probe_reports_the_whole_file_length_from_one_byte() {
-    // Given
-    let response = b"HTTP/1.1 206 Partial Content\r\n\
-Connection: keep-alive\r\n\
-Keep-Alive: timeout=300, max=4294967294\r\n\
-Accept-Ranges: bytes\r\n\
-Content-Type: application/octet-stream\r\n\
-Content-Range: bytes 1-1/37912939\r\n\
-Content-Length: 1\r\n\r\nX";
-    let mut transport = Fake::new(response);
-    let mut buf = [0u8; 512];
-
-    // When
-    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
-
-    // Then
-    assert_eq!(probed, Probed::Length(37_912_939));
-    let sent = String::from_utf8(transport.written.clone()).unwrap();
-    assert!(sent.contains("Range: bytes=1-1\r\n"), "sent: {sent}");
-}
-
-/// For a ruid the Tonies cloud does not know, teddyCloud passes on the
-/// cloud's **410 Gone**. That is no reason to delete a story already on the
-/// card.
-#[test]
-fn a_probe_for_an_unknown_figure_is_not_an_error() {
-    // Given
-    let mut transport = Fake::new(b"HTTP/1.1 410 Gone\r\nContent-Length: 39\r\n\r\n");
-    let mut buf = [0u8; 512];
-
-    // When
-    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
-
-    // Then
-    assert_eq!(probed, Probed::NoContent);
-}
-
-/// A server that answers the probe with the whole file (teddyCloud does for
-/// a range at offset zero) sends `Content-Length` and no `Content-Range`. That
-/// length is the file's length.
-#[test]
-fn a_probe_answered_with_the_whole_file_still_reports_its_length() {
-    // Given
-    let mut transport = Fake::new(b"HTTP/1.1 200 OK\r\nContent-Length: 60975\r\n\r\n");
-    let mut buf = [0u8; 512];
-
-    // When
-    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
-
-    // Then
-    assert_eq!(probed, Probed::Length(60_975));
-}
-
-/// A `304` has no length. A probe sends no conditional header, so it should
-/// not get one, but if it does, guessing a length could wrongly mark a good
-/// file stale.
-#[test]
-fn a_probe_that_learns_no_length_says_so() {
-    // Given
-    let mut transport = Fake::new(b"HTTP/1.1 304 Not Modified\r\n\r\n");
-    let mut buf = [0u8; 512];
-
-    // When
-    let probed = block_on(probe_length(&mut transport, &request(None), &mut buf)).unwrap();
-
-    // Then
-    assert_eq!(probed, Probed::Unstated);
 }
 
 /// The same `410 Gone` on the download path. It means "no story", not "the

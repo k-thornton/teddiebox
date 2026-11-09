@@ -9,11 +9,10 @@ pub mod stream;
 
 pub use freshness::{build_freshness_check, Fresh, FRESHNESS_PATH};
 pub use request::{
-    build_content_request, build_length_probe, build_path_request, parse_etag, ContentRequest,
-    ETag, Route, MAX_ETAG,
+    build_content_request, build_path_request, parse_etag, ContentRequest, ETag, Route, MAX_ETAG,
 };
 pub use response::{parse_head, ContentRange, ResponseHead};
-pub use stream::{begin, begin_prepared, probe_length, Begun, Body, Probed};
+pub use stream::{begin, begin_prepared, Begun, Body};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloudError {

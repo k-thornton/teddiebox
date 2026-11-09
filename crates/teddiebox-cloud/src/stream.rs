@@ -8,9 +8,7 @@
 //! This file only moves and counts bytes; `build_content_request` and
 //! `parse_head` make the decisions.
 
-use crate::{
-    build_content_request, build_length_probe, parse_head, CloudError, ContentRequest, ETag,
-};
+use crate::{build_content_request, parse_head, CloudError, ContentRequest, ETag};
 use embedded_io_async::{Read, Write};
 
 /// What a response turned out to be.
@@ -62,59 +60,6 @@ pub(crate) async fn read_head<T: Read + Write>(
         }
         received += n;
     }
-}
-
-/// What a length probe learned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Probed {
-    /// How long the whole file is now.
-    Length(u32),
-    /// The server has no story for this figure.
-    ///
-    /// `410 Gone` as well as `404`: for a ruid the Tonies cloud does not know,
-    /// teddyCloud passes on the cloud's `410`. Either way, this is no reason
-    /// to delete a story already on the card.
-    NoContent,
-    /// The server answered, and its answer contains no length.
-    ///
-    /// Separate from a transport failure. Both mean "do nothing", but they
-    /// are logged differently.
-    Unstated,
-}
-
-/// Asks how long a file is now, without downloading it.
-///
-/// Reads only the head. The one byte of body a `206` carries is left in `buf`
-/// and ignored.
-pub async fn probe_length<T: Read + Write>(
-    transport: &mut T,
-    request: &ContentRequest<'_>,
-    buf: &mut [u8],
-) -> Result<Probed, CloudError> {
-    let mut request_bytes = [0u8; 512];
-    let n = build_length_probe(request, &mut request_bytes)?;
-    transport
-        .write_all(&request_bytes[..n])
-        .await
-        .map_err(|_| CloudError::Transport)?;
-    transport.flush().await.map_err(|_| CloudError::Transport)?;
-
-    let (head, _, _) = read_head(transport, buf).await?;
-    Ok(match head.status {
-        404 | 410 => Probed::NoContent,
-        // A `206` gives the whole length in its `Content-Range`; a `200` is
-        // the whole file, so its `Content-Length` is the length. teddyCloud
-        // really does answer some ranges with `200`.
-        206 => match head.content_range.and_then(|range| range.total) {
-            Some(total) => Probed::Length(total),
-            None => Probed::Unstated,
-        },
-        200 => match head.content_length {
-            Some(length) => Probed::Length(length),
-            None => Probed::Unstated,
-        },
-        _ => Probed::Unstated,
-    })
 }
 
 /// Sends the request and parses the response head.
