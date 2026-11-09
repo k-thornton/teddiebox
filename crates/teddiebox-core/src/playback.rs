@@ -138,12 +138,10 @@ impl Playback {
                 let _ = actions.push(Action::Pause);
                 self.ask_if_unchecked(tag, &mut actions);
             }
-            // Stop the download. The partial file keeps its sidecar, so
-            // placing the figure again resumes instead of starting over.
-            State::Fetching(_) => {
-                let _ = actions.push(Action::AbortFetch);
-            }
-            State::Idle | State::Failed => {}
+            // The download goes on without the figure, so the story is there,
+            // or further along, when it is placed again. Only a different
+            // story's request stops it; the firmware decides that.
+            State::Fetching(_) | State::Idle | State::Failed => {}
         }
         self.state = State::Idle;
         actions
@@ -639,10 +637,10 @@ mod tests {
         assert!(actions.is_empty());
     }
 
-    /// Lifting a figure mid-download stops the download. The partial file and
-    /// its sidecar stay on the card, so placing it again resumes.
+    /// Lifting a figure mid-download leaves the download running, so the
+    /// story is further along, or complete, when the figure comes back.
     #[test]
-    fn lifting_a_figure_that_is_still_fetching_abandons_the_download() {
+    fn lifting_a_figure_that_is_still_fetching_leaves_the_download_running() {
         // Given
         let mut p = Playback::new();
         p.on_tag_present(TAG, &unknown());
@@ -652,7 +650,7 @@ mod tests {
         let actions = p.on_tag_absent();
 
         // Then
-        assert_eq!(actions.as_slice(), &[Action::AbortFetch]);
+        assert!(actions.is_empty(), "{actions:?}");
         assert_eq!(p.kind(), PlaybackKind::Idle);
     }
 

@@ -15,9 +15,13 @@ use teddiebox_taf::PAGE_SIZE;
 
 /// Pages the writer must be past the body's start before playback begins.
 ///
-/// 24 pages is 96 KB, about eight seconds at 96 kbps: time enough for the
-/// radio to settle into its rate and stay ahead of the decoder.
-pub const HEAD_START: Pages = Pages(24);
+/// 64 pages is 256 KB, about twenty seconds at 96 kbps, and the same as the
+/// throttle's pause threshold (`PAUSE_ABOVE` in `main.rs`): the download is
+/// already pausing when audio starts. Measured with 24: three audio restarts
+/// in the first four seconds, while the radio still ran at full speed beside
+/// the decoder; none once the throttle had paused it. At the ~100 KB/s seen
+/// against teddyCloud this is about 2.5 s after the first byte.
+pub const HEAD_START: Pages = Pages(64);
 
 /// Whole pages the writer must be past the one about to be read, so a frame
 /// that crosses a page boundary has all its bytes.
@@ -102,6 +106,21 @@ pub fn is_writing() -> bool {
     with(|s| s.is_some_and(|s| s.writer_open))
 }
 
+/// Whether a download is writing this story right now.
+pub fn is_writing_path(directory: u32, file: u32) -> bool {
+    with(|s| s.is_some_and(|s| s.writer_open && (s.directory, s.file) == (directory, file)))
+}
+
+/// A figure placed again while its story still downloads: say "enough to
+/// start" once more, so the new placement joins the download.
+pub fn rearm() {
+    with(|s| {
+        if let Some(s) = s {
+            s.announced = false;
+        }
+    });
+}
+
 /// The writer is finished. Returns whether the caller should close the
 /// handle: it should not while a playback still reads from it, and that
 /// playback then closes it.
@@ -161,7 +180,9 @@ pub fn lead() -> Option<Pages> {
         if !stream.reader_open {
             return None;
         }
-        Some(Pages((stream.written / PAGE_SIZE as u32).saturating_sub(page)))
+        Some(Pages(
+            (stream.written / PAGE_SIZE as u32).saturating_sub(page),
+        ))
     })
 }
 

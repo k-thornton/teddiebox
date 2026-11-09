@@ -450,6 +450,10 @@ fn freshness_of(answer: teddiebox_download::Answer, tag: TagUid) -> Freshness {
 /// Set while audio is being fed, so the download can leave the radio alone.
 static PLAYING: AtomicBool = AtomicBool::new(false);
 
+/// The `audio_id` of the partial file a download is about to continue, read
+/// by `plan_download`; zero when there is none or it cannot be read.
+static PARTIAL_AUDIO_ID: AtomicU32 = AtomicU32::new(0);
+
 /// How far ahead the download is of whatever is waiting on it.
 ///
 /// The download is not told how far playback has got, so it always reports
@@ -532,6 +536,12 @@ fn plan_download(card: Option<&storage::Mounted>, path: ContentPath) -> Plan {
 
     let length_on_card = card.audio_length(dir, file);
     plan.on_card = length_on_card.unwrap_or(0);
+    // The version of what is on the card, for the net task to check before
+    // it continues a partial file (see `fetch_story`).
+    let partial_id = CardIndex::new(card)
+        .audio_id(TagUid::from_ruid(((dir as u64) << 32) | file as u64))
+        .unwrap_or(0);
+    PARTIAL_AUDIO_ID.store(partial_id, Ordering::Relaxed);
 
     // **Ignore the sidecar of a file the server found out of date.** It
     // would say the file is complete, and the stale copy would be played
@@ -1266,13 +1276,8 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         Action::Pause | Action::Stop => {
             esp_println::println!("teddiebox: plate stopping");
             audio::STOP.store(true, Ordering::Relaxed);
-            // A story that was still downloading stops downloading too, as a
-            // lift during a plain download does. The partial file keeps its
-            // sidecar, so the next placement continues it.
-            if stream::is_writing() {
-                esp_println::println!("teddiebox: plate abandoning the download with the story");
-                transfer(Transfer::abort);
-            }
+            // A story that was still downloading keeps downloading, so the
+            // next placement finds more of it, or all of it, on the card.
         }
 
         // Limits and steps are handled by the reducer; this only passes on
@@ -1317,13 +1322,22 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
             audio::SKIP.store(audio::SKIP_BACK, Ordering::Relaxed);
         }
 
-        Action::AbortFetch => {
-            esp_println::println!("teddiebox: plate abandoning the download");
-            transfer(Transfer::abort);
-        }
-
         Action::RequestContent(tag) => {
             let ruid = tag.ruid();
+            let path = teddiebox_download::content_path(tag.0);
+            // The story is already on its way: join that download rather
+            // than start another. The next idle pass reports it ready.
+            if stream::is_writing_path(path.directory, path.file) {
+                esp_println::println!("teddiebox: plate joining the download of {ruid:016X}");
+                stream::rearm();
+                return;
+            }
+            // Another story's download gives way; its partial file keeps its
+            // sidecar for a later resume.
+            if stream::is_writing() {
+                esp_println::println!("teddiebox: plate abandoning another story's download");
+                transfer(Transfer::abort);
+            }
             esp_println::println!("teddiebox: plate fetching {ruid:016X}");
             // Written as one value; see `FetchRequest`.
             critical_section::with(|cs| {
@@ -1585,6 +1599,7 @@ fn feed_tick(
         // idle timeout would cut them short.
         reducer.note_in_use(
             PLAYING.load(Ordering::Relaxed)
+                || stream::is_writing()
                 || battery::BATLOG_EVERY.load(Ordering::Relaxed) > 0
                 || STAY_AWAKE.load(Ordering::Relaxed),
         );
@@ -2549,6 +2564,29 @@ async fn fetch_story(
         }
     };
 
+    // A partial file is continued only if it is still the server's version:
+    // teddyCloud sends no ETag, and a replaced story of the same length would
+    // otherwise be joined onto the old one's start.
+    let from = if from > 0 {
+        let on_card = PARTIAL_AUDIO_ID.load(Ordering::Relaxed);
+        match tls::freshness(tls, stack, server, requested, on_card, token).await {
+            Ok(teddiebox_cloud::Fresh::Changed) => {
+                esp_println::println!(
+                    "teddiebox: get the partial file is an older version — starting over"
+                );
+                0
+            }
+            Ok(_) => from,
+            Err(e) => {
+                esp_println::println!(
+                    "teddiebox: get could not check the partial file's version — {e:?}; resuming anyway"
+                );
+                from
+            }
+        }
+    } else {
+        from
+    };
     if from > 0 {
         esp_println::println!("teddiebox: get resuming from {from}");
     }

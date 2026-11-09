@@ -128,8 +128,6 @@ pub enum Action {
     /// need two open handles on one file and a rename, and the SD card library
     /// supports neither.
     Revalidate(TagUid),
-    /// Stop a download that is no longer needed.
-    AbortFetch,
     PlayPrompt(Prompt),
     /// Play a short sound about a press, over whatever is playing.
     PlayCue(cue::Cue),
