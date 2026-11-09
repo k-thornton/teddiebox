@@ -1224,6 +1224,21 @@ fn flush_place(index: &CardIndex<'_>, why: &str) {
     }
 }
 
+/// Puts a lifted story's place on the card at once, in the form the
+/// resume mode reads: the box-wide last-figure record, or the story's own
+/// position file. RAM keeps its copy; this only makes it survive a reboot.
+fn persist_place(index: &CardIndex<'_>, tag: TagUid, page: u32) {
+    if resume_every() {
+        write_place(index, tag, page, "lifted");
+        return;
+    }
+    let mut out = [0u8; teddiebox_core::place::MAX_LAST];
+    let len = teddiebox_core::place::render_last(tag.ruid(), page, &mut out);
+    if let Err(reason) = index.card().write_last_played(&out[..len]) {
+        esp_println::println!("teddiebox: plate place not saved — {reason}");
+    }
+}
+
 fn write_place(index: &CardIndex<'_>, tag: TagUid, page: u32, why: &str) {
     match index.remember(tag, page) {
         Ok(()) => esp_println::println!(
@@ -1428,11 +1443,12 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
         }
 
         Action::SavePosition { tag, pos } => {
-            // Kept in RAM, not written to the card: figures are lifted and put
-            // back often, and the card only needs the place when RAM is about
-            // to be lost.
+            // In RAM, which is what the next placement reads, and on the card
+            // as well: a brownout, a reflash or a pulled battery loses RAM,
+            // and a stock box resumes after any of them. The write is small.
             if let Position::Exact { page } = pos {
                 remember_in_ram(index, tag, page);
+                persist_place(index, tag, page);
             }
         }
 
