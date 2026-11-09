@@ -11,6 +11,12 @@ involved: yt-dlp lists and downloads anonymously, so playlists must be
 "E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"
 ```
 
+The web page at `http://<server>:8080/` lists every card TeddyCloud has seen,
+takes a playlist or video URL for each, shows the title, chapter count and
+last render, and has a "render again" button. It edits the same `cards.toml`
+and wakes the service, so an assignment renders within a couple of minutes.
+`web_port = 0` turns the page off.
+
 Each pass (every `interval_minutes`, and the file is re-read each time), every
 card's playlist is listed. When its set of videos differs from the last render,
 the audio is downloaded, packed into one TAF with one chapter per video

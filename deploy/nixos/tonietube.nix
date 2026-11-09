@@ -11,6 +11,8 @@
   virtualisation.oci-containers.containers.tonietube = {
     image = "localhost/tonietube:latest";
     volumes = [ "/var/lib/tonietube:/data" ];
+    # The web page: assign a playlist to a card, see what was rendered.
+    ports = [ "8080:8080" ];
     environment = {
       PYTHONUNBUFFERED = "1";
       TZ = "America/Los_Angeles";
@@ -20,4 +22,5 @@
   };
 
   systemd.tmpfiles.rules = [ "d /var/lib/tonietube 0755 kyle users -" ];
+  networking.firewall.allowedTCPPorts = [ 8080 ];
 }
