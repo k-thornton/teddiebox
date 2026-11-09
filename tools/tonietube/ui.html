@@ -70,8 +70,15 @@ async function load() {
     if (!cards.some(c => c.ruid === ruid)) cards.push({ ruid, tonie: "", source: "", tracks: 0, ...s });
   }
   if (!cards.length) { box.innerHTML = '<p class="empty">No cards yet. Tap one on the box.</p>'; return; }
+  // A card being edited keeps its element, so a redraw never eats typing.
+  const editing = {};
+  for (const f of box.querySelectorAll("form")) {
+    const inputs = [...f.querySelectorAll("input")];
+    if (f.contains(document.activeElement) || inputs.some(i => i.value !== i.defaultValue)) editing[f.dataset.ruid] = f.closest(".card");
+  }
   box.innerHTML = "";
   for (const c of cards) {
+    if (editing[c.ruid]) { box.appendChild(editing[c.ruid]); continue; }
     const el = document.createElement("div");
     el.className = "card";
     const state = c.busy ? '<span class="meta">rendering…</span>'
