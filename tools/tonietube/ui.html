@@ -74,7 +74,7 @@ async function load() {
   const editing = {};
   for (const f of box.querySelectorAll("form")) {
     const inputs = [...f.querySelectorAll("input")];
-    if (f.contains(document.activeElement) || inputs.some(i => i.value !== i.defaultValue)) editing[f.dataset.ruid] = f.closest(".card");
+    if (inputs.includes(document.activeElement) || inputs.some(i => i.value !== i.defaultValue)) editing[f.dataset.ruid] = f.closest(".card");
   }
   box.innerHTML = "";
   for (const c of cards) {
@@ -134,6 +134,7 @@ document.addEventListener("submit", e => {
   const f = e.target;
   const url = f.url.value.trim(), name = f.name.value.trim();
   const now = status.cards[f.dataset.ruid] || {};
+  for (const i of f.querySelectorAll("input")) i.defaultValue = i.value; // saved: no longer being edited
   if (now.url === url && (now.name || "") === name) return; // nothing changed
   send({ uid: f.dataset.uid, ruid: f.dataset.ruid, url, name });
 });
