@@ -1,41 +1,20 @@
 //! Whether a story already on the card is still the story the server has.
 //!
-//! The check compares the file's length, the one thing teddyCloud reliably
-//! reports. This is weaker than an ETag: a new version with exactly the same
-//! length looks current. Story audio rarely changes, so that is acceptable.
-//!
-//! teddyCloud sends no ETag for content it already has. Whether it passes one
-//! on for content it fetches from the Tonies cloud has not been measured. The
-//! length check works either way.
+//! The box asks the stock question, `/v1/freshness-check`, with the
+//! `audio_id` from the TAF header on the card, and the server names the
+//! figures whose story has changed. The header is read straight from the
+//! file, so a story placed on the card by hand is checked like a downloaded
+//! one.
 //!
 //! Most important: when there is no answer (server unreachable, figure
-//! unknown to the cloud, no length in the reply), the file on the card is
-//! kept. Revalidation must never make a working box worse than being offline.
-
-use crate::Sidecar;
-use teddiebox_cloud::Probed;
+//! unknown to the cloud, no usable reply), the file on the card is kept.
+//! Revalidation must never make a working box worse than being offline.
 
 /// How many figures are remembered as asked-about since boot.
 ///
 /// Eight is plenty for one play session. Going over only costs one extra
 /// check for the ninth figure.
 pub const REMEMBERED: usize = 8;
-
-/// Whether the cached file is out of date and must be fetched again.
-///
-/// Only a length the server actually *gave*, and that differs from the
-/// sidecar's, makes a file stale. Anything else returns `false`, and the
-/// cached copy plays.
-pub fn is_stale(cached: &Sidecar, probed: Probed) -> bool {
-    match probed {
-        Probed::Length(total) => total != cached.length,
-        // The server has no story for this figure. Keep the card's copy; it
-        // may be the only one left.
-        Probed::NoContent => false,
-        // The server answered without a length, so nothing is contradicted.
-        Probed::Unstated => false,
-    }
-}
 
 /// Which figures have already been asked about since the box booted.
 ///
@@ -94,15 +73,16 @@ impl Asked {
 /// A successful check takes a few seconds, well within this limit.
 pub const PATIENCE_MS: u64 = 10_000;
 
-/// What the server said about a figure's length, reduced to what the box can
+/// What the server said about a figure's story, reduced to what the box can
 /// act on.
 ///
-/// `Nothing` covers every answer that is not a length: no story, no length,
-/// unreachable, Wi-Fi failed, or the time ran out. The box does the same for
-/// all of them: plays the card. The console logs which one it was.
+/// `Nothing` covers every answer that is not "changed": the same story, no
+/// story, unreachable, Wi-Fi failed, or the time ran out. The box does the
+/// same for all of them: plays the card. The console logs which one it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
-    Length(u32),
+    /// The server's story differs from the one on the card.
+    Changed,
     Nothing,
 }
 
@@ -197,83 +177,6 @@ impl Revalidation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teddiebox_cloud::ETag;
-
-    fn sidecar(length: u32) -> Sidecar {
-        Sidecar { length, etag: None }
-    }
-
-    /// Real numbers: `1d2e3f50500304e0` is 37,912,939 bytes on the server and
-    /// on the card.
-    #[test]
-    fn a_length_that_matches_is_current() {
-        // Given
-        let on_card = sidecar(37_912_939);
-
-        // When
-        let stale = is_stale(&on_card, Probed::Length(37_912_939));
-
-        // Then
-        assert!(!stale);
-    }
-
-    #[test]
-    fn a_length_that_differs_is_stale_whichever_way_it_moved() {
-        // Given
-        let on_card = sidecar(37_912_939);
-
-        // When
-        let longer = is_stale(&on_card, Probed::Length(37_912_940));
-        let shorter = is_stale(&on_card, Probed::Length(1_024));
-
-        // Then
-        assert!(longer);
-        assert!(shorter);
-    }
-
-    /// The most important case: a figure the server has no story for keeps
-    /// the story on the card.
-    #[test]
-    fn a_server_with_no_story_never_discards_the_one_on_the_card() {
-        // Given
-        let on_card = sidecar(37_912_939);
-
-        // When
-        let stale = is_stale(&on_card, Probed::NoContent);
-
-        // Then
-        assert!(!stale);
-    }
-
-    #[test]
-    fn an_answer_without_a_length_changes_nothing() {
-        // Given
-        let on_card = sidecar(37_912_939);
-
-        // When
-        let stale = is_stale(&on_card, Probed::Unstated);
-
-        // Then
-        assert!(!stale);
-    }
-
-    /// An etag in the sidecar is ignored; only the length counts.
-    #[test]
-    fn the_recorded_etag_does_not_enter_into_it() {
-        // Given
-        let with_etag = Sidecar {
-            length: 4_096,
-            etag: Some(ETag::try_from("\"v1\"").unwrap()),
-        };
-
-        // When
-        let longer = is_stale(&with_etag, Probed::Length(8_192));
-        let same = is_stale(&with_etag, Probed::Length(4_096));
-
-        // Then
-        assert!(longer);
-        assert!(!same);
-    }
 
     #[test]
     fn a_figure_asked_about_once_is_not_asked_again() {
@@ -349,14 +252,14 @@ mod tests {
         r.asked(FIGURE, 0);
 
         // When
-        let settled = r.answered(FIGURE, Answer::Length(37_912_939));
+        let settled = r.answered(FIGURE, Answer::Changed);
 
         // Then
         assert_eq!(
             settled,
             Some(Settled {
                 ruid: FIGURE,
-                answer: Answer::Length(37_912_939)
+                answer: Answer::Changed
             })
         );
     }
@@ -392,7 +295,7 @@ mod tests {
         r.polled(10_000);
 
         // When
-        let settled = r.answered(FIGURE, Answer::Length(1_024));
+        let settled = r.answered(FIGURE, Answer::Changed);
 
         // Then
         assert_eq!(settled, None);
@@ -405,10 +308,10 @@ mod tests {
         // Given
         let mut r = Revalidation::new();
         r.asked(FIGURE, 0);
-        r.answered(FIGURE, Answer::Length(37_912_939));
+        r.answered(FIGURE, Answer::Changed);
 
         // When
-        let settled = r.answered(FIGURE, Answer::Length(1_024));
+        let settled = r.answered(FIGURE, Answer::Changed);
 
         // Then
         assert_eq!(settled, None);
@@ -443,7 +346,7 @@ mod tests {
         r.asked(OTHER, 100);
 
         // When
-        let settled = r.answered(FIGURE, Answer::Length(1_024));
+        let settled = r.answered(FIGURE, Answer::Changed);
 
         // Then
         assert_eq!(settled, None);
@@ -481,7 +384,7 @@ mod tests {
         r.withdrawn();
 
         // When
-        let settled = r.answered(FIGURE, Answer::Length(1_024));
+        let settled = r.answered(FIGURE, Answer::Changed);
 
         // Then
         assert_eq!(settled, None);

@@ -2,10 +2,12 @@
 
 //! Client for a LAN-local teddyCloud server.
 
+pub mod freshness;
 pub mod request;
 pub mod response;
 pub mod stream;
 
+pub use freshness::{build_freshness_check, Fresh, FRESHNESS_PATH};
 pub use request::{
     build_content_request, build_length_probe, build_path_request, parse_etag, ContentRequest,
     ETag, Route, MAX_ETAG,

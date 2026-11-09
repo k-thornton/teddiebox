@@ -29,7 +29,7 @@ pub use content_path::{content_path, hex8, ContentPath};
 pub use handshake::{CardSays, Handshake, Step, DEADLINE_MS, RETRY_MS};
 pub use outcome::{Outcome, Outcomes};
 pub use reconcile::{reconcile, Action, Mismatch};
-pub use revalidate::{is_stale, Answer, Asked, Revalidation, Settled, PATIENCE_MS, REMEMBERED};
+pub use revalidate::{Answer, Asked, Revalidation, Settled, PATIENCE_MS, REMEMBERED};
 pub use sidecar::{Sidecar, MAX_SIDECAR};
 pub use throttle::{next_step, Continue, Throttle};
 pub use transfer::{Finished, Head, Plan, Transfer, Work};

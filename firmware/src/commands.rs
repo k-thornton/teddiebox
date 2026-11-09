@@ -315,6 +315,7 @@ fn queue_fetch(ruid: [u8; 8]) {
             ruid: u64::from_be_bytes(ruid),
             token,
             probe: false,
+            audio_id: 0,
         });
     });
     NET_REQUEST.store(NET_GET, Ordering::Relaxed);

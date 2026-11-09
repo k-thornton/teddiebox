@@ -48,6 +48,40 @@ impl TonieHeader {
     }
 }
 
+impl TonieHeader {
+    /// The `audio_id` alone, from however much of the header page is in hand.
+    ///
+    /// For the freshness check, which needs nothing else from the header.
+    /// The field sits a few dozen bytes in, right after the hash, so a short
+    /// read of the file is enough, and the chapter list after it may be cut
+    /// off. `None` when the bytes do not reach it or are not a header.
+    pub fn audio_id_in(prefix: &[u8]) -> Option<u32> {
+        let proto_len = u32::from_be_bytes(prefix.get(0..4)?.try_into().ok()?) as usize;
+        if proto_len == 0 || proto_len > PAGE_SIZE - 4 {
+            return None;
+        }
+        let body = &prefix[4..prefix.len().min(4 + proto_len)];
+        let mut pos = 0usize;
+        while pos < body.len() {
+            let key = read_varint(body, &mut pos)?;
+            match (key >> 3, key & 0x07) {
+                (3, 0) => return u32::try_from(read_varint(body, &mut pos)?).ok(),
+                (_, 0) => {
+                    read_varint(body, &mut pos)?;
+                }
+                (_, 1) => pos = pos.checked_add(8)?,
+                (_, 2) => {
+                    let len = read_varint(body, &mut pos)? as usize;
+                    pos = pos.checked_add(len)?;
+                }
+                (_, 5) => pos = pos.checked_add(4)?,
+                _ => return None,
+            }
+        }
+        None
+    }
+}
+
 /// Decodes one protobuf field into `header`, or skips it by wire type if the
 /// field is unknown — a newer TAF with an extra field still reads.
 fn apply_field(
@@ -294,5 +328,79 @@ mod tests {
 
         // Then
         assert_eq!(parsed, Err(TafError::MalformedHeader));
+    }
+}
+
+#[cfg(test)]
+mod audio_id_tests {
+    use super::*;
+
+    /// hash (field 1, 20 bytes), data_length (2) = 8192, audio_id (3) =
+    /// 0x1AF0F5B0, then a chapter list (4) that may be cut off.
+    fn fields() -> [u8; 40] {
+        let mut f = [0u8; 40];
+        f[0] = 0x0A;
+        f[1] = 20;
+        f[2..22].copy_from_slice(&[0xCD; 20]);
+        f[22..25].copy_from_slice(&[0x10, 0x80, 0x40]); // 8192
+        f[25..31].copy_from_slice(&[0x18, 0xB0, 0xEB, 0xC3, 0xD7, 0x01]); // 0x1AF0F5B0
+        f[31..40].copy_from_slice(&[0x20, 0x00, 0x20, 0x10, 0x20, 0x20, 0x20, 0x30, 0x20]);
+        f
+    }
+
+    fn prefix(cut: usize) -> heapless::Vec<u8, 64> {
+        let f = fields();
+        let mut out = heapless::Vec::new();
+        out.extend_from_slice(&(f.len() as u32).to_be_bytes())
+            .unwrap();
+        out.extend_from_slice(&f[..cut.min(f.len())]).unwrap();
+        out
+    }
+
+    #[test]
+    fn the_audio_id_is_read_from_a_whole_header() {
+        // Given
+        let bytes = prefix(40);
+
+        // When
+        let id = TonieHeader::audio_id_in(&bytes);
+
+        // Then
+        assert_eq!(id, Some(0x1AF0_F5B0));
+    }
+
+    #[test]
+    fn a_prefix_cut_in_the_chapter_list_still_gives_the_audio_id() {
+        // Given: 31 bytes of fields reach the end of audio_id exactly
+        let bytes = prefix(31);
+
+        // When
+        let id = TonieHeader::audio_id_in(&bytes);
+
+        // Then
+        assert_eq!(id, Some(0x1AF0_F5B0));
+    }
+
+    #[test]
+    fn a_prefix_cut_before_the_audio_id_gives_none() {
+        // Given
+        let bytes = prefix(28);
+
+        // When
+        let id = TonieHeader::audio_id_in(&bytes);
+
+        // Then
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_header_give_none() {
+        // Given
+        let not_a_header = [0u8; 8];
+        let too_short = [0u8; 3];
+
+        // When / Then
+        assert_eq!(TonieHeader::audio_id_in(&not_a_header), None);
+        assert_eq!(TonieHeader::audio_id_in(&too_short), None);
     }
 }

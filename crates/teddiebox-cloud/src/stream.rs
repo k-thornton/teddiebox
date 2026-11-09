@@ -40,7 +40,7 @@ pub enum Begun {
 /// Reading until the server closes would hang with a keep-alive server. Returns
 /// the head, where the body starts in `buf`, and how many bytes arrived in
 /// total (bytes after the head are already part of the body).
-async fn read_head<T: Read + Write>(
+pub(crate) async fn read_head<T: Read + Write>(
     transport: &mut T,
     buf: &mut [u8],
 ) -> Result<(crate::ResponseHead, usize, usize), CloudError> {

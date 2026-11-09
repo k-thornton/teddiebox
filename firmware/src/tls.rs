@@ -26,7 +26,7 @@ use mbedtls_rs::{
     SessionError, Tls, TlsReference, TlsVersion, X509,
 };
 use static_cell::StaticCell;
-use teddiebox_cloud::stream::{self, Begun, Body, Probed};
+use teddiebox_cloud::stream::{self, Begun, Body};
 use teddiebox_cloud::{CloudError, ContentRequest, ETag, Route};
 use teddiebox_core::checksum::Crc32;
 use teddiebox_download::Continue;
@@ -616,22 +616,19 @@ pub async fn prime(client: &Client, stack: &Stack<'_>, server: &str) -> Result<(
     Ok(())
 }
 
-/// Asks how long a figure's story is on the server now, and downloads none of
-/// it.
+/// Asks the server whether a figure's story has changed, by `audio_id`.
 ///
-/// Uses the same request builder as a download, so both ask for the same
-/// file.
-pub async fn length(
+/// The same connection set-up as [`length`]; only the request differs. The
+/// token is sent as a download would send it, for a server that forwards the
+/// question upstream.
+pub async fn freshness(
     client: &Client,
     stack: &Stack<'_>,
-    wanted: &Wanted<'_>,
-) -> Result<Probed, Error> {
-    let Wanted {
-        server,
-        ruid,
-        token,
-        ..
-    } = *wanted;
+    server: &str,
+    ruid: u64,
+    audio_id: u32,
+    token: Option<&[u8; 32]>,
+) -> Result<teddiebox_cloud::Fresh, Error> {
     let mut name = [0u8; MAX_NAME];
     let (_host, address, port) = resolve(stack, server, &mut name).await?;
 
@@ -648,26 +645,11 @@ pub async fn length(
     .map_err(Error::Handshake)?;
     client.handshake(&mut session).await?;
 
-    let mut uid = ruid;
-    uid.reverse();
-    let request = ContentRequest {
-        uid,
-        // Same route choice as `fetch`, so the probe asks about the same file.
-        route: if token.is_some() {
-            Route::V2
-        } else {
-            Route::V1
-        },
-        etag: None,
-        server,
-        from: None,
-        auth: token,
-    };
-
     let mut buf = [0u8; 1024];
     let mut wire = Reporting::new(&mut session);
-    let probed = stream::probe_length(&mut wire, &request, &mut buf).await;
-    let answer = probed.map_err(|e| wire.explain(e))?;
+    let asked =
+        teddiebox_cloud::freshness::check(&mut wire, server, ruid, audio_id, token, &mut buf).await;
+    let answer = asked.map_err(|e| wire.explain(e))?;
     let _ = session.close().await;
     Ok(answer)
 }

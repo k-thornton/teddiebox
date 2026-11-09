@@ -230,10 +230,15 @@ struct FetchRequest {
     token: Option<[u8; 32]>,
     /// Whether this is a question rather than a download.
     ///
-    /// A probe uses the same request, token and radio handling as a fetch,
-    /// and only asks for less. Marking it here, rather than with a second
-    /// request type, means a probe and a fetch can never be queued at once.
+    /// A probe uses the same token and radio handling as a fetch, and only
+    /// asks whether the story changed. Marking it here, rather than with a
+    /// second request type, means a probe and a fetch can never be queued at
+    /// once.
     probe: bool,
+    /// For a probe: the `audio_id` of the story on the card, which the
+    /// server compares with its own. Zero when the card's file has no
+    /// readable header, which the server reads as "older than anything".
+    audio_id: u32,
 }
 
 /// The fetch about to be raised on [`NET_GET`], written whole in one go.
@@ -421,37 +426,23 @@ fn why_unavailable(error: &tls::Error) -> Unavailable {
 
 /// What a probe's answer means for the story on the card.
 ///
-/// Only "the server gave a different length" counts as `Stale`. Everything
+/// Only "the server has a different story" counts as `Stale`. Everything
 /// else answers `Current`, because none of it is evidence against a file that
 /// is on the card and plays: checking must never make the box worse than it
 /// would be offline.
-fn freshness_of(
-    answer: teddiebox_download::Answer,
-    tag: TagUid,
-    card: Option<&storage::Mounted>,
-) -> Freshness {
-    let teddiebox_download::Answer::Length(total) = answer else {
-        return Freshness::Current;
-    };
-    let Some(card) = card else {
-        // Without a card there is nothing to compare against.
-        return Freshness::Current;
-    };
-    let Some(sidecar) = CardIndex::new(card).sidecar(tag) else {
-        return Freshness::Current;
-    };
-    if teddiebox_download::is_stale(&sidecar, teddiebox_cloud::Probed::Length(total)) {
-        esp_println::println!(
-            "teddiebox: plate {:016X} is {} bytes here and {total} there — fetching it on the next placement",
-            tag.ruid(),
-            sidecar.length
-        );
-        // Read by the download the reducer is about to request.
-        let path = teddiebox_download::content_path(tag.0);
-        critical_section::with(|cs| *STALE.borrow_ref_mut(cs) = Some(path));
-        Freshness::Stale
-    } else {
-        Freshness::Current
+fn freshness_of(answer: teddiebox_download::Answer, tag: TagUid) -> Freshness {
+    match answer {
+        teddiebox_download::Answer::Changed => {
+            esp_println::println!(
+                "teddiebox: plate {:016X} has changed on the server — fetching it on the next placement",
+                tag.ruid()
+            );
+            // Read by the download the reducer is about to request.
+            let path = teddiebox_download::content_path(tag.0);
+            critical_section::with(|cs| *STALE.borrow_ref_mut(cs) = Some(path));
+            Freshness::Stale
+        }
+        teddiebox_download::Answer::Nothing => Freshness::Current,
     }
 }
 
@@ -1311,6 +1302,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     ruid,
                     token,
                     probe: false,
+                    audio_id: 0,
                 });
             });
             NET_REQUEST.store(NET_GET, Ordering::Relaxed);
@@ -1326,7 +1318,10 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     (seen == tag).then_some(kept).flatten()
                 })
             });
-            esp_println::println!("teddiebox: plate asking the server about {ruid:016X}");
+            let audio_id = index.audio_id(tag).unwrap_or(0);
+            esp_println::println!(
+                "teddiebox: plate asking the server about {ruid:016X}, version {audio_id:08X}"
+            );
             critical_section::with(|cs| {
                 REVALIDATION
                     .borrow_ref_mut(cs)
@@ -1337,6 +1332,7 @@ fn perform(action: Action, index: &CardIndex<'_>, token: Option<[u8; 32]>) {
                     ruid,
                     token,
                     probe: true,
+                    audio_id,
                 });
             });
             NET_REQUEST.store(NET_GET, Ordering::Relaxed);
@@ -1454,7 +1450,7 @@ fn gather_events(card: Option<&storage::Mounted>, placed: &mut Placed) -> [Optio
 
     events[0] = take_plate_event(placed);
     events[1] = gather_fetch_outcome(placed);
-    events[2] = gather_revalidation(card, placed);
+    events[2] = gather_revalidation(placed);
 
     events
 }
@@ -1490,7 +1486,7 @@ fn gather_fetch_outcome(placed: &Placed) -> Option<Event> {
 /// Read every pass, like the fetch outcome. Each call is its own short
 /// critical section, with no printing inside: a console line at 115200 baud
 /// would keep interrupts off for milliseconds.
-fn gather_revalidation(card: Option<&storage::Mounted>, placed: &Placed) -> Option<Event> {
+fn gather_revalidation(placed: &Placed) -> Option<Event> {
     let mut settled = None;
     if let Some((ruid, answer)) = take_answer() {
         settled =
@@ -1525,7 +1521,7 @@ fn gather_revalidation(card: Option<&storage::Mounted>, placed: &Placed) -> Opti
     // will likely stay so for the session, and asking again wastes the
     // radio. A stale story is marked for its next placement.
     critical_section::with(|cs| ASKED.borrow_ref_mut(cs).remember(probed_ruid));
-    let freshness = freshness_of(answer, TagUid::from_ruid(probed_ruid), card);
+    let freshness = freshness_of(answer, TagUid::from_ruid(probed_ruid));
     match placed
         .answering(probed_ruid)
         .resolve(|tag| Event::Revalidated(tag, freshness))
@@ -2167,11 +2163,13 @@ async fn serve_get_while_connected(
                 ruid,
                 token,
                 probe: true,
-            }) => ask_length(tls, stack, &config.server, ruid, token.as_ref()).await,
+                audio_id,
+            }) => ask_freshness(tls, stack, &config.server, ruid, audio_id, token.as_ref()).await,
             Some(FetchRequest {
                 ruid,
                 token,
                 probe: false,
+                ..
             }) => fetch_story(tls, stack, &config.server, ruid, token.as_ref()).await,
         },
     }
@@ -2401,34 +2399,30 @@ async fn bring_up(
     None
 }
 
-/// Asks the server how long a figure's story is, and posts the answer.
+/// Asks the server whether a figure's story has changed, and posts the answer.
 ///
 /// Posts one whatever happens, because the reducer waits for it before
 /// playing (see [`probe_ended`]).
-async fn ask_length(
+async fn ask_freshness(
     tls: &tls::Client,
     stack: &embassy_net::Stack<'_>,
     server: &str,
     requested: u64,
+    audio_id: u32,
     token: Option<&[u8; 32]>,
 ) {
-    let wanted = tls::Wanted {
-        server,
-        ruid: requested.to_be_bytes(),
-        token,
-        from: None,
-        etag: None,
-    };
-    let answer = tls::length(tls, stack, &wanted).await;
+    let answer = tls::freshness(tls, stack, server, requested, audio_id, token).await;
     match answer {
-        Ok(teddiebox_cloud::Probed::Length(total)) => {
-            esp_println::println!("teddiebox: ask {requested:016X} is {total} bytes");
-            post_answer(requested, teddiebox_download::Answer::Length(total));
+        Ok(teddiebox_cloud::Fresh::Changed) => {
+            esp_println::println!("teddiebox: ask {requested:016X} — the server has a newer story");
+            post_answer(requested, teddiebox_download::Answer::Changed);
         }
         // Every other case plays what is on the card; only the console tells
         // them apart.
         Ok(other) => {
-            esp_println::println!("teddiebox: ask {requested:016X} learned nothing — {other:?}");
+            esp_println::println!(
+                "teddiebox: ask {requested:016X} — {other:?}, keeping the card's"
+            );
             post_answer(requested, teddiebox_download::Answer::Nothing);
         }
         Err(e) => {

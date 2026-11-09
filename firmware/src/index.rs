@@ -65,6 +65,21 @@ impl<'a> CardIndex<'a> {
         self.card
     }
 
+    /// The `audio_id` in the story's TAF header: the version the server
+    /// compares in a freshness check.
+    ///
+    /// Read from the file itself, so a story placed on the card by hand has
+    /// one like a downloaded story. `None` when there is no readable story.
+    pub fn audio_id(&self, tag: TagUid) -> Option<u32> {
+        let path = content_path(tag.0);
+        let (file, _size) = self.card.open_content(path.directory, path.file).ok()?;
+        // The field is a few dozen bytes in, after the 20-byte hash.
+        let mut head = [0u8; 64];
+        let read = self.card.read(file, &mut head);
+        self.card.close_file(file);
+        teddiebox_taf::TonieHeader::audio_id_in(&head[..read.ok()?])
+    }
+
     /// Whether the card ships this story, as opposed to it being downloaded.
     ///
     /// Both kinds are under `CONTENT/`. Stock content is always complete and
@@ -90,15 +105,6 @@ impl<'a> CardIndex<'a> {
         let len = position::render(page, &mut out);
         self.card
             .write_position(stock, path.directory, path.file, &out[..len])
-    }
-
-    /// What the card's sidecar promises this story's whole length is.
-    ///
-    /// `None` for stock content, a story not on the card, or an unreadable
-    /// sidecar: in each case there is no length to compare with the server.
-    pub fn sidecar(&self, tag: TagUid) -> Option<Sidecar> {
-        let path = content_path(tag.0);
-        self.cached(path.directory, path.file).sidecar
     }
 
     fn cached(&self, directory: u32, file: u32) -> Cached {
@@ -158,22 +164,21 @@ impl ContentIndex for CardIndex<'_> {
     /// Whether this figure's story should be checked against the server once
     /// it stops playing.
     ///
-    /// No check is needed for:
-    /// - **Stock content**: a file under `CONTENT/` has no sidecar and was
-    ///   never downloaded.
+    /// Every playable story is checked, a file put on the card by hand as
+    /// much as a download: the check compares the `audio_id` in the file's
+    /// own header, so the server can replace either, as it does for a
+    /// creative-tonie. No check is needed for:
     /// - **An incomplete download**: it goes to the network anyway.
     /// - **A figure already checked since boot**: Wi-Fi uses the most battery,
     ///   and one boot is roughly one play session, since the box switches off
     ///   after five idle minutes.
     fn wants_revalidation(&self, tag: TagUid) -> bool {
         let path = content_path(tag.0);
-        if self.on_stock_card(path.directory, path.file) {
-            return false;
-        }
         if crate::already_asked(tag) {
             return false;
         }
-        playable_now(false, &self.cached(path.directory, path.file))
+        let stock = self.on_stock_card(path.directory, path.file);
+        playable_now(stock, &self.cached(path.directory, path.file))
     }
 
     /// A probe contradicted this story earlier in the session, while it

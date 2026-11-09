@@ -220,9 +220,9 @@ fn write_request(
 
 /// Formats straight into the caller's buffer, with no intermediate copy.
 /// Running out of room becomes `RequestTooLong`.
-struct SliceWriter<'a> {
-    out: &'a mut [u8],
-    used: usize,
+pub(crate) struct SliceWriter<'a> {
+    pub(crate) out: &'a mut [u8],
+    pub(crate) used: usize,
 }
 
 impl Write for SliceWriter<'_> {
