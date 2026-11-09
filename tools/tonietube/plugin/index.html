@@ -2,15 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Playlists</title>
-<script>
-  // tonietube serves its own page from this same machine on port 8080.
-  // TeddyCloud opens a standalone plugin in a new tab, so this just goes there.
-  location.replace("http://" + location.hostname + ":8080/");
-</script>
+<title>TonieTube</title>
+<style>html, body { margin: 0; height: 100%; } iframe { width: 100%; height: 100%; min-height: 70vh; border: 0; }</style>
 </head>
 <body>
-<p>Opening the playlists page… <a id="link">continue</a></p>
-<script>document.getElementById("link").href = "http://" + location.hostname + ":8080/";</script>
+<!-- The page itself is kept in TeddyCloud's library by the tonietube service,
+     so it updates with the service and this plugin folder never changes. -->
+<iframe src="/library/tonietube/ui.html" title="TonieTube"></iframe>
 </body>
 </html>

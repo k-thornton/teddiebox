@@ -1,9 +1,9 @@
 {
-  "pluginName": "Playlists",
-  "description": "Assign a YouTube playlist or video to a card and see what tonietube rendered for it. Opens the tonietube page on this server.",
-  "standalone": true,
+  "pluginName": "TonieTube",
+  "description": "YouTube playlists on Toniebox cards: assign a playlist or video to a card and see what tonietube rendered for it.",
+  "standalone": false,
   "author": "tonietube",
-  "version": "1.0",
+  "version": "1.1",
   "teddyCloudSection": "tonies",
   "icon": "YoutubeOutlined"
 }

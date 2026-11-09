@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TonieTube</title>
+<style>
+  :root { --fg: #1c1c1c; --muted: #6b6b6b; --line: #e3e3e3; --bg: #fff; --ok: #1d7a3a; --bad: #b3261e; --accent: #1677ff; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #eee; --muted: #9a9a9a; --line: #333; --bg: #141414; --ok: #5fcf7a; --bad: #ff7b72; --accent: #4096ff; } }
+  body { margin: 0; padding: 4px 2px 16px; font: 15px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  p.hint { color: var(--muted); margin: 0 0 14px; }
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .uid { font-family: ui-monospace, monospace; font-size: 13px; color: var(--muted); }
+  .title { font-weight: 600; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .err { color: var(--bad); font-size: 13px; }
+  .ok { color: var(--ok); }
+  form { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  input[type=url] { flex: 1 1 260px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--fg); font: inherit; }
+  button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--accent); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .empty { color: var(--muted); }
+</style>
+</head>
+<body>
+<p class="hint">Tap a new card on the box once, then paste a YouTube playlist or video URL for it here. A render takes a minute or two; playlist edits are picked up on their own.</p>
+<div id="cards"><p class="empty">Loading…</p></div>
+<script>
+// Everything goes through TeddyCloud: its tag list for the cards, and two
+// files tonietube keeps in the library: status.json (what it rendered) and
+// cards.json (what this page asks for).
+const DIR = "tonietube";
+const esc = s => String(s ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]));
+const fmtBytes = b => b ? (b / 1e6).toFixed(1) + " MB" : "";
+let status = { cards: {} };
+let pending = {}; // ruid -> url just sent, until status.json catches up
+let pendingRender = new Set();
+
+async function fetchJson(url) {
+  const r = await fetch(url + (url.includes("?") ? "&" : "?") + "t=" + Date.now(), { cache: "no-store" });
+  if (!r.ok) throw new Error(r.status + " " + r.statusText);
+  return r.json();
+}
+
+async function load() {
+  const box = document.getElementById("cards");
+  let tags;
+  try {
+    tags = (await fetchJson("/api/getTagIndex")).tags;
+    try { status = await fetchJson(`/library/${DIR}/status.json`); } catch { status = { cards: {} }; }
+  } catch (e) {
+    box.innerHTML = `<p class="err">Could not reach TeddyCloud: ${esc(e.message)}</p>`;
+    return;
+  }
+  const cards = tags.map(t => {
+    const info = t.tonieInfo || {};
+    const s = status.cards[t.ruid] || {};
+    const url = t.ruid in pending ? pending[t.ruid] : s.url;
+    if (t.ruid in pending && (s.url || null) === (pending[t.ruid] || null)) delete pending[t.ruid];
+    return { uid: t.uid, ruid: t.ruid, url, source: t.source || "", tracks: (t.trackSeconds || []).length,
+      tonie: [info.series, info.episode].filter(Boolean).join(" "), ...s, url, busy: s.busy || pendingRender.has(t.ruid) };
+  });
+  // Mapped cards TeddyCloud has not seen yet still show.
+  for (const [ruid, s] of Object.entries(status.cards)) {
+    if (!cards.some(c => c.ruid === ruid)) cards.push({ ruid, tonie: "", source: "", tracks: 0, ...s });
+  }
+  if (!cards.length) { box.innerHTML = '<p class="empty">No cards yet. Tap one on the box.</p>'; return; }
+  box.innerHTML = "";
+  for (const c of cards) {
+    const el = document.createElement("div");
+    el.className = "card";
+    const state = c.busy ? '<span class="meta">rendering…</span>'
+      : (c.ruid in pending) ? '<span class="meta">saving…</span>'
+      : c.error ? `<span class="err">${esc(c.error)}</span>`
+      : c.rendered ? `<span class="meta"><span class="ok">✓</span> ${esc(c.videos)} chapters, ${fmtBytes(c.bytes)}, rendered ${esc(c.rendered).replace("T", " ")}</span>`
+      : c.url ? '<span class="meta">waiting for the first render</span>'
+      : c.tonie ? `<span class="meta">${esc(c.tonie)}</span>`
+      : c.source ? `<span class="meta">${esc(c.tracks)} chapters from ${esc(c.source)}</span>`
+      : '<span class="meta">nothing assigned yet</span>';
+    el.innerHTML = `
+      <div class="row"><span class="title">${esc(c.title || c.tonie || "Card")}</span><span class="uid">${esc(c.uid)}</span></div>
+      <div>${state}</div>
+      <form data-uid="${esc(c.uid)}" data-ruid="${esc(c.ruid)}">
+        <input type="url" name="url" placeholder="https://youtube.com/playlist?list=…" value="${esc(c.url || "")}" required pattern="https?://([a-z0-9-]+\\.)*(youtube\\.com|youtu\\.be)/.*">
+        <button class="primary" type="submit">${c.url ? "Save" : "Assign"}</button>
+        ${c.url ? `<button type="button" data-render="${esc(c.ruid)}" ${c.busy ? "disabled" : ""}>Render again</button>` : ""}
+        ${c.url ? `<button type="button" data-clear="${esc(c.ruid)}">Remove</button>` : ""}
+      </form>`;
+    box.appendChild(el);
+  }
+}
+
+// The whole mapping, as the page wants it, plus any "render again" asks.
+async function send(change) {
+  const cards = {};
+  for (const [ruid, s] of Object.entries(status.cards)) if (s.url) cards[s.uid] = s.url;
+  for (const [ruid, url] of Object.entries(pending)) {
+    const uid = statusUid(ruid);
+    if (!uid) continue;
+    if (url) cards[uid] = url; else delete cards[uid];
+  }
+  if (change) {
+    if (change.url) cards[change.uid] = change.url; else delete cards[change.uid];
+    pending[change.ruid] = change.url || null;
+  }
+  const body = JSON.stringify({ seq: Date.now(), cards, render: [...pendingRender] });
+  const form = new FormData();
+  form.append("file", new Blob([body], { type: "application/json" }), "cards.json");
+  const r = await fetch(`/api/fileUpload?path=${DIR}&special=library`, { method: "POST", body: form });
+  if (!r.ok) alert("TeddyCloud refused the change: " + r.status);
+  load();
+}
+function statusUid(ruid) {
+  const s = status.cards[ruid];
+  if (s && s.uid) return s.uid;
+  const f = document.querySelector(`form[data-ruid="${ruid}"]`);
+  return f ? f.dataset.uid : null;
+}
+document.addEventListener("submit", e => {
+  e.preventDefault();
+  const f = e.target;
+  const url = f.url.value.trim();
+  if ((status.cards[f.dataset.ruid] || {}).url === url) return; // nothing changed
+  send({ uid: f.dataset.uid, ruid: f.dataset.ruid, url });
+});
+document.addEventListener("click", e => {
+  const b = e.target;
+  if (b.dataset.render) { pendingRender.add(b.dataset.render); send(); setTimeout(() => pendingRender.delete(b.dataset.render), 20000); }
+  if (b.dataset.clear) { const f = b.closest("form"); send({ uid: f.dataset.uid, ruid: b.dataset.clear, url: "" }); }
+});
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

@@ -13,15 +13,13 @@ web page, so it is not in the repository):
 "E0:04:01:53:2A:8B:77:38" = "https://youtube.com/playlist?list=PLQBVGreLWMIQ"
 ```
 
-The web page at `http://<server>:8080/` is the normal way to assign cards. It lists every card TeddyCloud has seen,
-takes a playlist or video URL for each, shows the title, chapter count and
-last render, and has a "render again" button. It edits the same `cards.toml`
-and wakes the service, so an assignment renders within a couple of minutes.
-`web_port = 0` turns the page off.
-
-`plugin/` is a TeddyCloud plugin that puts the page in TeddyCloud's Tonies
-menu as "Playlists"; it opens the page in a new tab. Install it by copying
-the folder to `/var/lib/teddycloud/plugins/tonietube/` on the server.
+The UI is TeddyCloud's **TonieTube** page (Tonies menu, or Community → TC
+Plugins). It lists every card TeddyCloud has seen, takes a playlist or video
+URL for each, shows the title, chapter count and last render, and has a
+"render again" button. It runs entirely inside TeddyCloud: the service keeps
+the page as `tonietube/ui.html` and its status as `tonietube/status.json` in
+TeddyCloud's library, and the page writes `tonietube/cards.json` there, which
+the service reads every few seconds and applies to `cards.toml`.
 
 Each pass (every `interval_minutes`, and the file is re-read each time), every
 card's playlist is listed. When its set of videos differs from the last render,

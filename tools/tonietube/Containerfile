@@ -8,8 +8,7 @@ RUN apt-get update \
 
 COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY tonietube.py web.html /app/
-EXPOSE 8080
+COPY tonietube.py ui.html /app/
 
 VOLUME /data
 ENV TONIETUBE_CONFIG=/data/cards.toml

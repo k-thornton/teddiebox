@@ -9,9 +9,11 @@ and assigned to the card. Nothing here needs a Google account.
 
     tonietube.py [--config cards.toml] [--once] [--force]
 
-A small web page (port `web_port`, default 8080) lists the cards TeddyCloud
-knows, takes a URL for each, and shows what was rendered; it edits the same
-cards.toml.
+The UI is a TeddyCloud plugin (`plugin/`): its page is kept in TeddyCloud's
+library as `tonietube/ui.html`, reads this service's `tonietube/status.json`
+beside it, and writes `tonietube/cards.json` with changes, which this service
+picks up and applies to cards.toml. Everything goes through TeddyCloud, so
+the page needs no port or certificate of its own.
 """
 import argparse
 import hashlib
@@ -46,7 +48,6 @@ def load_config(path):
     cfg.setdefault("interval_minutes", 30)
     cfg.setdefault("library_dir", "tonietube")
     cfg.setdefault("bitrate", 96)
-    cfg.setdefault("web_port", 8080)
     cfg.setdefault("cards", {})
     if cfg.get("ca_file"):  # relative to the config file
         cfg["ca_file"] = os.path.join(os.path.dirname(os.path.abspath(path)), cfg["ca_file"])
@@ -206,6 +207,29 @@ class TeddyCloud:
     def get_json(self, path):
         return json.loads(self._call(path))
 
+    def get_library(self, path):
+        """A library file's bytes, or None when there is no such file."""
+        try:
+            return self._call(f"/library/{urllib.parse.quote(path)}", timeout=15)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+
+    def put_library(self, remote_dir, name, data):
+        """Puts `data` into the library as `remote_dir/name`."""
+        boundary = uuid.uuid4().hex
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        ).encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        q = urllib.parse.urlencode({"path": remote_dir, "special": "library"})
+        self._call(
+            f"/api/fileUpload?{q}",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+
     def mkdir(self, name):
         try:
             self._call("/api/dirCreate?special=library", data=name.encode())
@@ -301,7 +325,10 @@ def sync_all(cfg, state, tc, force=False, only=None):
 
 
 class Service:
-    """One pass at a time, in the main thread; the web thread only asks."""
+    """One pass at a time, in the main thread; the page talks through files
+    in TeddyCloud's library, which `watch_page` reads every few seconds."""
+
+    POLL_SECONDS = 5
 
     def __init__(self, config_path):
         self.config_path = os.path.abspath(config_path)
@@ -310,149 +337,102 @@ class Service:
         self.lock = threading.Lock()
         self.force = set()  # ruids to render again on the next pass
         self.busy = None  # the ruid being rendered right now
+        self.applied_seq = None  # the page's last request we acted on
 
     def cfg(self):
         return load_config(self.config_path)
 
+    def client(self, cfg=None):
+        cfg = cfg or self.cfg()
+        return TeddyCloud(cfg["teddycloud"], cfg.get("ca_file"))
+
     def run_once(self, force_all=False):
         cfg = self.cfg()
         state = State(self.state_path)
-        tc = TeddyCloud(cfg["teddycloud"], cfg.get("ca_file"))
+        tc = self.client(cfg)
         with self.lock:
             only = None if (force_all or not self.force) else set(self.force)
             self.force.clear()
         if only:
             sync_all(cfg, state, tc, only=only)
         sync_all(cfg, state, tc, force=force_all)
+        self.publish(cfg, tc)
         return cfg
 
-    def cards(self):
-        """Every tag TeddyCloud knows, with what this service knows about it."""
-        cfg = self.cfg()
+    def status(self, cfg=None):
+        """What the page shows about each mapped card, by ruid."""
+        cfg = cfg or self.cfg()
         state = State(self.state_path)
-        tc = TeddyCloud(cfg["teddycloud"], cfg.get("ca_file"))
-        tags = tc.get_json("/api/getTagIndex")["tags"]
-        out = []
-        for tag in tags:
-            rid = tag["ruid"]
-            info = tag.get("tonieInfo") or {}
-            known = state.get(rid)
-            out.append(
-                {
-                    "uid": tag["uid"],
-                    "ruid": rid,
-                    "url": cfg["cards"].get(rid),
-                    "source": tag.get("source") or "",
-                    "tracks": len(tag.get("trackSeconds") or []) if tag.get("source") else 0,
-                    "tonie": " ".join(x for x in (info.get("series"), info.get("episode")) if x),
-                    "title": known.get("title"),
-                    "videos": known.get("videos"),
-                    "bytes": known.get("bytes"),
-                    "rendered": known.get("rendered"),
-                    "error": known.get("error"),
-                    "busy": self.busy == rid,
-                }
-            )
-        # Cards in the config that TeddyCloud has not seen yet still show.
-        seen = {c["ruid"] for c in out}
+        cards = {}
         for rid, url in cfg["cards"].items():
-            if rid not in seen:
-                known = state.get(rid)
-                out.append(
-                    {
-                        "uid": ":".join(reversed([rid[i : i + 2] for i in range(0, 16, 2)])).upper(),
-                        "ruid": rid,
-                        "url": url,
-                        "source": "",
-                        "tracks": 0,
-                        "tonie": "",
-                        "title": known.get("title"),
-                        "videos": known.get("videos"),
-                        "bytes": known.get("bytes"),
-                        "rendered": known.get("rendered"),
-                        "error": known.get("error"),
-                        "busy": self.busy == rid,
-                    }
-                )
-        return out
+            known = state.get(rid)
+            cards[rid] = {
+                "uid": ":".join(reversed([rid[i : i + 2] for i in range(0, 16, 2)])).upper(),
+                "url": url,
+                "title": known.get("title"),
+                "videos": known.get("videos"),
+                "bytes": known.get("bytes"),
+                "rendered": known.get("rendered"),
+                "error": known.get("error"),
+                "busy": self.busy == rid,
+            }
+        return {"cards": cards, "written": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
-    def set_url(self, uid, url):
-        # A save with the same URL changes nothing; a new URL renders on the
-        # next pass only if its videos differ, as any edit does. Only "render
-        # again" forces one: a fresh render is a new version to the box, and
-        # the box downloads it again and starts the story over.
-        if (url or None) == self.cfg()["cards"].get(ruid(uid)):
+    def publish(self, cfg=None, tc=None):
+        """Puts the page and the status beside it into TeddyCloud's library."""
+        cfg = cfg or self.cfg()
+        tc = tc or self.client(cfg)
+        try:
+            tc.mkdir(cfg["library_dir"])
+            here = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(here, "ui.html"), "rb") as f:
+                tc.put_library(cfg["library_dir"], "ui.html", f.read())
+            tc.put_library(cfg["library_dir"], "status.json", json.dumps(self.status(cfg)).encode())
+        except Exception:
+            log.exception("could not publish the page's files to TeddyCloud")
+
+    def apply_requests(self):
+        """Reads the page's `cards.json` and acts on it once per sequence number."""
+        cfg = self.cfg()
+        tc = self.client(cfg)
+        raw = tc.get_library(f"{cfg['library_dir']}/cards.json")
+        if raw is None:
             return
-        set_card(self.config_path, uid, url or None)
-        self.wake.set()
+        req = json.loads(raw)
+        seq = req.get("seq")
+        if seq is None or seq == self.applied_seq:
+            return
+        wanted = {ruid(uid): (uid, url) for uid, url in (req.get("cards") or {}).items() if url}
+        changed = False
+        for rid, (uid, url) in wanted.items():
+            if cfg["cards"].get(rid) != url:
+                set_card(self.config_path, uid, url)
+                changed = True
+                log.info("%s: the page assigned %s", rid, url)
+        for rid in set(cfg["cards"]) - set(wanted):
+            uid = ":".join(reversed([rid[i : i + 2] for i in range(0, 16, 2)])).upper()
+            set_card(self.config_path, uid, None)
+            changed = True
+            log.info("%s: the page removed the mapping", rid)
+        again = [r for r in (req.get("render") or []) if re.fullmatch(r"[0-9a-f]{16}", r)]
+        if again:
+            with self.lock:
+                self.force.update(again)
+            log.info("the page asked to render %s again", ", ".join(again))
+        self.applied_seq = seq
+        if changed or again:
+            self.wake.set()
+        else:
+            self.publish(cfg, tc)
 
-    def render_again(self, rid):
-        with self.lock:
-            self.force.add(rid)
-        self.wake.set()
-
-
-def serve_web(service, port):
-    import http.server
-
-    page = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web.html"), "rb").read()
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, fmt, *args):
-            log.debug("web: " + fmt, *args)
-
-        def send(self, code, body, ctype="application/json"):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def body_json(self):
-            # Only the page itself may write: a form posted from another
-            # site cannot send this content type, and a browser says when
-            # a request crosses sites.
-            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
-                raise ValueError("JSON only")
-            site = self.headers.get("Sec-Fetch-Site")
-            if site not in (None, "same-origin", "none"):
-                raise ValueError("requests from other sites are refused")
-            origin = self.headers.get("Origin")
-            if origin and urllib.parse.urlsplit(origin).hostname != (self.headers.get("Host") or "").split(":")[0]:
-                raise ValueError("requests from other sites are refused")
-            n = int(self.headers.get("Content-Length") or 0)
-            return json.loads(self.rfile.read(n) or b"{}")
-
-        def do_GET(self):
-            if self.path == "/":
-                return self.send(200, page, "text/html; charset=utf-8")
-            if self.path == "/api/cards":
-                try:
-                    return self.send(200, json.dumps(service.cards()).encode())
-                except Exception as e:
-                    return self.send(502, json.dumps({"error": f"{e}"}).encode())
-            self.send(404, b"{}")
-
-        def do_POST(self):
+    def watch_page(self):
+        """Runs in its own thread: the page's requests, every few seconds."""
+        while True:
             try:
-                if self.path == "/api/cards":
-                    body = self.body_json()
-                    service.set_url(body["uid"], body.get("url", "").strip())
-                    return self.send(200, b"{}")
-                if self.path.startswith("/api/render/"):
-                    self.body_json()  # the same same-site checks
-                    rid = self.path.rsplit("/", 1)[1]
-                    if not re.fullmatch(r"[0-9a-f]{16}", rid):
-                        raise ValueError("not a card")
-                    service.render_again(rid)
-                    return self.send(200, b"{}")
-            except Exception as e:
-                return self.send(400, json.dumps({"error": f"{e}"}).encode())
-            self.send(404, b"{}")
-
-    server = http.server.ThreadingHTTPServer(("", port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True, name="web").start()
-    log.info("web page on port %d", port)
+                self.apply_requests()
+            except Exception:
+                log.exception("could not read the page's request")
+            time.sleep(self.POLL_SECONDS)
 
 
 def main():
@@ -475,15 +455,15 @@ def main():
             sys.exit(f"{tool} not found on PATH")
 
     service = Service(args.config)
-    if not args.once and service.cfg()["web_port"]:
-        serve_web(service, service.cfg()["web_port"])
+    if not args.once:
+        threading.Thread(target=service.watch_page, daemon=True, name="page").start()
     while True:
         # The config is re-read each pass, so edits need no restart.
         cfg = service.run_once(force_all=args.force)
         if args.once:
             break
         args.force = False
-        # Woken early by the web page; otherwise the regular interval.
+        # Woken early by the page's requests; otherwise the regular interval.
         service.wake.wait(cfg["interval_minutes"] * 60)
         service.wake.clear()
 
