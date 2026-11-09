@@ -26,6 +26,10 @@ pub enum Cue {
     VolumeDown,
     /// Two short beeps: the volume is already at its top or bottom.
     VolumeLimit,
+    /// G5, B5 then D6, rising: the story's download finished while it
+    /// played. A stock box chimes over the story at that moment too; these
+    /// notes are this firmware's own, not measured from one.
+    Downloaded,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +109,22 @@ static VOLUME_LIMIT: [Segment; 3] = [
     },
 ];
 
+static DOWNLOADED: [Segment; 5] = [
+    Segment::Note {
+        hz: 783.99,
+        frames: SKIP_SECOND,
+    },
+    Segment::Silence { frames: SKIP_GAP },
+    Segment::Note {
+        hz: 987.77,
+        frames: SKIP_SECOND,
+    },
+    Segment::Silence { frames: SKIP_GAP },
+    Segment::Note {
+        hz: 1_174.66,
+        frames: SKIP_SECOND,
+    },
+];
 /// The skip notes' 2nd and 3rd harmonics: −26 dB and −42 dB.
 const SECOND_HARMONIC: f32 = 0.050_12;
 const THIRD_HARMONIC: f32 = 0.007_94;
@@ -124,6 +144,7 @@ impl Cue {
             Cue::VolumeUp => &VOLUME_UP,
             Cue::VolumeDown => &VOLUME_DOWN,
             Cue::VolumeLimit => &VOLUME_LIMIT,
+            Cue::Downloaded => &DOWNLOADED,
         }
     }
 
@@ -154,6 +175,7 @@ impl Cue {
             Cue::VolumeUp => 3,
             Cue::VolumeDown => 4,
             Cue::VolumeLimit => 5,
+            Cue::Downloaded => 6,
         }
     }
 
@@ -165,6 +187,7 @@ impl Cue {
             3 => Some(Cue::VolumeUp),
             4 => Some(Cue::VolumeDown),
             5 => Some(Cue::VolumeLimit),
+            6 => Some(Cue::Downloaded),
             _ => None,
         }
     }
@@ -325,12 +348,13 @@ mod tests {
 
     use super::*;
 
-    const ALL: [Cue; 5] = [
+    const ALL: [Cue; 6] = [
         Cue::SkipForward,
         Cue::SkipBack,
         Cue::VolumeUp,
         Cue::VolumeDown,
         Cue::VolumeLimit,
+        Cue::Downloaded,
     ];
 
     /// The whole cue, as the left channel.
@@ -402,6 +426,7 @@ mod tests {
                 (Cue::VolumeUp, 960),
                 (Cue::VolumeDown, 960),
                 (Cue::VolumeLimit, 3_360),
+                (Cue::Downloaded, 18_104),
             ]
         );
     }
@@ -721,6 +746,7 @@ mod tests {
                 (Cue::VolumeUp, 3),
                 (Cue::VolumeDown, 4),
                 (Cue::VolumeLimit, 5),
+                (Cue::Downloaded, 6),
             ]
         );
     }
@@ -741,7 +767,7 @@ mod tests {
     #[test]
     fn a_byte_that_names_no_cue_is_refused() {
         // Given
-        let strays = [0, 6];
+        let strays = [0, 7];
 
         // When
         let cues = strays.map(Cue::from_code);

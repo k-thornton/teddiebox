@@ -1,5 +1,6 @@
 //! What the box is doing, and what placing or lifting a figure changes.
 
+use crate::cue::Cue;
 use crate::{Action, Actions, PlaybackKind, Position, Prompt, TagUid};
 
 /// Answers whether content is available locally, and where playback last
@@ -158,6 +159,12 @@ impl Playback {
 
     pub fn on_content_ready<I: ContentIndex>(&mut self, tag: TagUid, index: &I) -> Actions {
         let mut actions = Actions::new();
+        // The story is already playing from its own download, which has now
+        // finished: say so over it, as a stock box does.
+        if self.state == State::Playing(tag) {
+            let _ = actions.push(Action::PlayCue(Cue::Downloaded));
+            return actions;
+        }
         // Ignore a download that finished after the figure was lifted or swapped.
         if self.state != State::Fetching(tag) {
             return actions;
@@ -635,6 +642,29 @@ mod tests {
 
         // Then
         assert!(actions.is_empty());
+    }
+
+    /// A story playing while it downloads: when the download finishes, a
+    /// chime over the story says so, and nothing else changes.
+    #[test]
+    fn a_download_finishing_under_its_own_playing_story_chimes() {
+        // Given
+        let mut p = Playback::new();
+        let playing = Index {
+            available: true,
+            resume: Position::Start,
+            wants_asking: false,
+            stale: false,
+        };
+        p.on_tag_present(TAG, &playing);
+        assert_eq!(p.kind(), PlaybackKind::Playing);
+
+        // When
+        let actions = p.on_content_ready(TAG, &playing);
+
+        // Then
+        assert_eq!(actions.as_slice(), &[Action::PlayCue(Cue::Downloaded)]);
+        assert_eq!(p.kind(), PlaybackKind::Playing);
     }
 
     /// Lifting a figure mid-download leaves the download running, so the
